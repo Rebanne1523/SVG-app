@@ -439,3 +439,19 @@ def test_canvas_tool_resizes_page_not_content(win):
     tool._typed("width", 640.0)
     assert d.current_sheet().width == 640.0
     assert tool.shortcut == "C" and c.tools["measure"].shortcut == "S"
+
+
+def test_ctrl_s_saves_in_place(win, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog
+    from vectorflow.model import Anchor, PathNode, Style, SubPath
+    calls = []
+    target = str(tmp_path / "p.vflow")
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (calls.append(1), (target, ""))[1]))
+    win.save()
+    assert len(calls) == 1
+    win.doc.add_node(PathNode([SubPath([Anchor(1, 1), Anchor(5, 5)], False)], Style(), "x"))
+    win.save()
+    win.open_paths(target)                      # reopen the project, edit, save: still no dialog
+    win.doc.add_node(PathNode([SubPath([Anchor(1, 1), Anchor(5, 5)], False)], Style(), "y"))
+    win.save()
+    assert len(calls) == 1 and win.doc.path == target

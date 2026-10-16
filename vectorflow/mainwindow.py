@@ -612,8 +612,10 @@ class MainWindow(QMainWindow):
     def dropEvent(self, e):
         paths = [u.toLocalFile() for u in e.mimeData().urls()
                  if u.toLocalFile().lower().endswith((".svg", ".svgz", ".pdf", PROJECT_EXT))]
-        if paths:
-            self.import_paths(paths)
+        if len(paths) == 1 and paths[0].lower().endswith(PROJECT_EXT):
+            self.open_paths(paths)                    # a dropped project opens as the project (Ctrl+S then just saves)
+        elif paths:
+            self.import_paths([q for q in paths if not q.lower().endswith(PROJECT_EXT)] or paths)
 
     # ------------------------------------------------------------ edit commands
     def delete(self):
