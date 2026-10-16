@@ -2,6 +2,9 @@ import os
 import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+import tempfile
+
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="vf-config-")   # never touch the real settings
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 

@@ -7,6 +7,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen, QTransform)
 from PySide6.QtWidgets import QInputDialog, QWidget
 
+from .model import Sheet
 from .render import render_document
 from .snap import EdgeIndex, SnapIndex
 
@@ -72,6 +73,7 @@ class Canvas(QWidget):
         self._space = False
         self._pan = None
         self._tmp_tool = None
+        self.last_mouse = None  # last cursor position in document coordinates
         self._fitted = False
         self.set_document(doc)
 
@@ -143,13 +145,23 @@ class Canvas(QWidget):
         b = self.to_doc((self.width(), self.height()))
         return QRectF(a[0], a[1], b[0] - a[0], b[1] - a[1])
 
-    def fit_view(self):
-        W, H = max(1.0, self.doc.width), max(1.0, self.doc.height)
-        m = 40
-        z = min((self.width() - 2 * m) / W, (self.height() - 2 * m) / H)
+    def fit_rect(self, r, margin=40):
+        if r.isNull() or r.width() < 1e-6 or r.height() < 1e-6:
+            r = QRectF(0, 0, 1920, 1080)
+        z = min((self.width() - 2 * margin) / r.width(), (self.height() - 2 * margin) / r.height())
         self.zoom = max(0.02, min(64.0, z if z > 0 else 1.0))
-        self.origin = QPointF((self.width() - W * self.zoom) / 2, (self.height() - H * self.zoom) / 2)
+        c = r.center()
+        self.origin = QPointF(self.width() / 2 - c.x() * self.zoom, self.height() / 2 - c.y() * self.zoom)
         self._view_changed()
+
+    def fit_view(self):
+        """Show every sheet."""
+        self.fit_rect(self.doc.sheets_rect())
+
+    def fit_sheet(self, sheet=None):
+        sheet = sheet or self.doc.current_sheet()
+        if sheet is not None:
+            self.fit_rect(sheet.rect())
 
     def fit_selection(self):
         if not self.doc.selection:
@@ -196,26 +208,63 @@ class Canvas(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), BG)
         vt = self.view_transform()
-        W, H = self.doc.width, self.doc.height
-        # page shadow + page
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(0, 0, 0, 70))
-        tl = self.to_view((0, 0))
-        p.drawRect(QRectF(tl[0] + 4, tl[1] + 4, W * self.zoom, H * self.zoom))
-        p.setBrush(QColor(255, 255, 255))
-        p.drawRect(QRectF(tl[0], tl[1], W * self.zoom, H * self.zoom))
+        cur = self.doc.current_sheet()
+        for sh in self.doc.sheets():
+            tl = self.to_view((sh.x, sh.y))
+            w, h = sh.width * self.zoom, sh.height * self.zoom
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 70))
+            p.drawRect(QRectF(tl[0] + 4, tl[1] + 4, w, h))
+            p.setBrush(QColor(255, 255, 255))
+            p.drawRect(QRectF(tl[0], tl[1], w, h))
         p.save()
         p.setTransform(vt)
         p.setClipRect(self.view_rect_doc().adjusted(-2, -2, 2, 2))
         render_document(p, self.doc, cull=self.view_rect_doc())
         p.restore()
         p.setRenderHint(QPainter.Antialiasing, True)
+        self._paint_sheet_frames(p, cur)
         self._paint_selection(p, vt)
         self._paint_guides(p)
         if self.tool is not None:
             self.tool.paint(p)
         self._paint_marker(p)
         p.end()
+
+    def sheet_label_rect(self, sh, fm=None):
+        """Clickable name tag above the top-left corner of a sheet (view coordinates)."""
+        from PySide6.QtGui import QFontMetricsF
+        fm = fm or QFontMetricsF(self.font())
+        v = self.to_view((sh.x, sh.y))
+        return QRectF(v[0], v[1] - 22, min(fm.horizontalAdvance(sh.name) + 14, max(60.0, sh.width * self.zoom)), 20)
+
+    def hit_sheet_label(self, vp):
+        pt = QPointF(*vp)
+        for sh in reversed(self.doc.sheets()):
+            if self.sheet_label_rect(sh).contains(pt):
+                return sh
+        return None
+
+    def _paint_sheet_frames(self, p, cur):
+        from PySide6.QtGui import QFontMetricsF
+        fm = QFontMetricsF(self.font())
+        p.setBrush(Qt.NoBrush)
+        for sh in self.doc.sheets():
+            tl = self.to_view((sh.x, sh.y))
+            r = QRectF(tl[0], tl[1], sh.width * self.zoom, sh.height * self.zoom)
+            is_cur = sh is cur
+            pen = QPen(SEL_COLOR if is_cur else QColor(120, 120, 124))
+            pen.setWidthF(1.5 if is_cur else 1.0)
+            p.setPen(pen)
+            p.drawRect(r)
+            lab = self.sheet_label_rect(sh, fm)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(40, 110, 190) if is_cur else QColor(80, 80, 84))
+            p.drawRoundedRect(lab, 3, 3)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(lab.adjusted(7, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                       fm.elidedText(sh.name, Qt.ElideRight, lab.width() - 10))
+            p.setBrush(Qt.NoBrush)
 
     def _paint_selection(self, p, vt):
         sel = self.doc.selection
@@ -319,12 +368,16 @@ class Canvas(QWidget):
             return None
         level = level or self.select_level
         if level == "folder":
-            n = hit
-            while n.parent is not None and n.parent.parent is not None and n.parent.parent.parent is not None:
-                n = n.parent
-            # n is now a direct child of a top level layer (or of root)
-            return n
+            return self._folder_level(hit)
         return hit
+
+    def _folder_level(self, n):
+        """The item directly below its layer (a whole folder when the vector sits inside one)."""
+        while n.parent is not None and not self.doc.is_layer(n) and not self.doc.is_layer(n.parent):
+            if isinstance(n.parent, Sheet) or n.parent is self.doc.root:
+                break
+            n = n.parent
+        return n
 
     def nodes_in_rect(self, rect: QRectF, level=None):
         out = []
@@ -345,8 +398,7 @@ class Canvas(QWidget):
         if level == "folder":
             res = []
             for n in out:
-                while n.parent is not None and n.parent.parent is not None and n.parent.parent.parent is not None:
-                    n = n.parent
+                n = self._folder_level(n)
                 if n not in res:
                     res.append(n)
             return res
@@ -494,6 +546,7 @@ class Canvas(QWidget):
             self._pan = (x, y)
             return
         ev = Ev(self, e, Qt.NoButton)
+        self.last_mouse = ev.p
         self.cursorMoved.emit(ev.p[0], ev.p[1])
         if self.tool is not None:
             self.tool.move(ev)
@@ -552,6 +605,7 @@ class Canvas(QWidget):
         super().keyReleaseEvent(e)
 
     def leaveEvent(self, e):
+        self.last_mouse = None
         self.clear_snap()
         self.hover = None
         self.update()

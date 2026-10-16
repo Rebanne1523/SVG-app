@@ -362,6 +362,37 @@ class Group(Node):
         return r
 
 
+class Sheet(Group):
+    """A page of the project. Sheets live directly under the document root and their children are
+    the layers. Everything inside uses absolute canvas coordinates; (x, y) is the page's top-left
+    corner, so "position on the sheet" = canvas position - (x, y)."""
+
+    def __init__(self, name="Sheet", x=0.0, y=0.0, width=1920.0, height=1080.0, pt_per_unit=0.75,
+                 source=None):
+        super().__init__(name)
+        self.x, self.y = float(x), float(y)
+        self.width, self.height = float(width), float(height)
+        self.pt_per_unit = pt_per_unit  # 1.0 for PDF imports (1 unit = 1 pt), 0.75 for SVG px
+        self.source = source
+
+    def rect(self) -> QRectF:
+        return QRectF(self.x, self.y, self.width, self.height)
+
+    def get_geom(self):
+        return (super().get_geom(), self.x, self.y)
+
+    def set_geom(self, g):
+        super().set_geom(g[0])
+        self.x, self.y = g[1], g[2]
+
+    def transform(self, m, scale_stroke=False):
+        super().transform(m, scale_stroke)
+        self.x, self.y = affine.apply(m, self.x, self.y)  # pages only ever translate
+
+    def bounds(self):
+        return self.rect()
+
+
 class PathNode(Node):
     kind = "path"
 
@@ -811,10 +842,10 @@ class Document(QObject):
     selectionChanged = Signal()
     restored = Signal()
     metaChanged = Signal()
+    sheetChanged = Signal()
 
-    def __init__(self, width=1920.0, height=1080.0):
+    def __init__(self, width=1920.0, height=1080.0, pt_per_unit=0.75):
         super().__init__()
-        self.width, self.height = float(width), float(height)
         self.root = Group("root")
         self.selection: list[Node] = []
         self.path = None
@@ -825,12 +856,143 @@ class Document(QObject):
         self._pending = None
         self._merge = (None, 0.0)
         self._active_id = None
+        self._current_id = None
         self._counters = {}
         self.warnings = []
         self.source = None
+        self.new_sheet(width=width, height=height, pt_per_unit=pt_per_unit)
+
+    # sheets ----------------------------------------------------------
+    def sheets(self):
+        return [c for c in self.root.children if isinstance(c, Sheet)]
+
+    def sheet_of(self, node):
+        n = node
+        while n is not None:
+            if isinstance(n, Sheet):
+                return n
+            n = n.parent
+        return None
+
+    def current_sheet(self):
+        for c in self.root.children:
+            if c.id == self._current_id and isinstance(c, Sheet):
+                return c
+        sh = self.sheets()
+        self._current_id = sh[0].id if sh else None
+        return sh[0] if sh else None
+
+    def sheet_at(self, pt):
+        p = QPointF(*pt)
+        for s in reversed(self.sheets()):
+            if s.rect().contains(p):
+                return s
+        return None
+
+    def sheets_rect(self):
+        r = QRectF()
+        for s in self.sheets():
+            r = s.rect() if r.isNull() else r.united(s.rect())
+        return r
+
+    def is_layer(self, node):
+        return isinstance(node.parent, Sheet)
+
+    def layer_for_sheet(self, sheet):
+        """Where new things go inside ``sheet``: the active container if it lives there, else its top layer."""
+        ac = self.find(self._active_id) if self._active_id else None
+        if ac is not None and ac.is_group() and ac is not sheet and self.sheet_of(ac) is sheet:
+            return ac
+        groups = [c for c in sheet.children if c.is_group()]
+        if groups:
+            return groups[-1]
         layer = Group(self.new_name("Layer"))
-        self.root.add(layer)
-        self._active_id = layer.id
+        sheet.add(layer)
+        return layer
+
+    def set_current_sheet(self, sheet):
+        if sheet is None or sheet.id == self._current_id:
+            return
+        self._current_id = sheet.id
+        ac = self.find(self._active_id) if self._active_id else None
+        if ac is None or self.sheet_of(ac) is not sheet:
+            self._active_id = self.layer_for_sheet(sheet).id
+        self.sheetChanged.emit()
+        self.selectionChanged.emit()
+
+    def next_sheet_position(self, width, height):
+        sh = self.sheets()
+        if not sh:
+            return 0.0, 0.0
+        r = self.sheets_rect()
+        return r.right() + 80.0, r.top()
+
+    def new_sheet(self, name=None, width=1920.0, height=1080.0, x=None, y=None, pt_per_unit=0.75,
+                  source=None, add_layer=True):
+        """Create a blank sheet and append it to the project (no undo step; callers wrap it)."""
+        if x is None or y is None:
+            x, y = self.next_sheet_position(width, height)
+        sheet = Sheet(name or self.new_name("Sheet"), x, y, width, height, pt_per_unit, source)
+        if add_layer:
+            sheet.add(Group(self.new_name("Layer")))
+        self.root.add(sheet)
+        self._current_id = sheet.id
+        self._active_id = self.layer_for_sheet(sheet).id
+        return sheet
+
+    def add_sheet_object(self, sheet, x=None, y=None):
+        """Insert a detached Sheet (e.g. from an imported file) at (x, y), moving its content there."""
+        if x is None or y is None:
+            x, y = self.next_sheet_position(sheet.width, sheet.height)
+        dx, dy = x - sheet.x, y - sheet.y
+        if dx or dy:
+            sheet.transform(affine.translate(dx, dy))
+        sheet.x, sheet.y = x, y
+        if not sheet.children:
+            sheet.add(Group(self.new_name("Layer")))
+        self.root.add(sheet)
+        return sheet
+
+    def is_pristine(self):
+        """True for a brand new, untouched, empty project (so an import can replace it)."""
+        sh = self.sheets()
+        return (len(sh) == 1 and not self.modified and not self.undo_stack
+                and not any(True for _ in leaves(sh[0])))
+
+    def delete_sheet(self, sheet):
+        with self.edit(structure=True):
+            self.root.children.remove(sheet)
+            sheet.parent = None
+            if not self.sheets():
+                self.new_sheet()
+        alive = self.sheets()
+        self.selection = [n for n in self.selection if self.sheet_of(n) in alive]
+        self._current_id = None
+        cur = self.current_sheet()
+        self._active_id = self.layer_for_sheet(cur).id
+        self.sheetChanged.emit()
+        self.selectionChanged.emit()
+
+    def move_sheet(self, sheet, dx, dy):
+        sheet.transform(affine.translate(dx, dy))
+
+    def reassign_to_sheets(self, nodes):
+        """Nodes dragged so that their centre lies on another sheet become part of that sheet."""
+        moved = False
+        for n in common_ancestors_pruned(nodes):
+            b = n.bounds()
+            if b.isNull() and not (b.width() or b.height()):
+                continue
+            target = self.sheet_at((b.center().x(), b.center().y()))
+            if target is None or target is self.sheet_of(n):
+                continue
+            dest = self.layer_for_sheet(target)
+            if n.parent is not None:
+                n.parent.children.remove(n)
+            n.parent = None
+            dest.add(n)
+            moved = True
+        return moved
 
     # naming ----------------------------------------------------------
     def new_name(self, base):
@@ -859,6 +1021,13 @@ class Document(QObject):
                 uniq.append(n)
         changed = [id(n) for n in uniq] != [id(n) for n in self.selection]
         self.selection = uniq
+        if uniq:
+            sh = self.sheet_of(uniq[0])
+            if sh is not None and sh.id != self._current_id:
+                self._current_id = sh.id
+                if emit:
+                    self.sheetChanged.emit()
+                changed = True
         if len(uniq) == 1:
             n = uniq[0]
             self._active_id = n.id if n.is_group() else (n.parent.id if n.parent else self._active_id)
@@ -877,8 +1046,9 @@ class Document(QObject):
 
     def active_container(self) -> Group:
         g = self.find(self._active_id) if self._active_id else None
-        if g is None or not g.is_group():
-            g = self.root.children[-1] if self.root.children and self.root.children[-1].is_group() else self.root
+        cur = self.current_sheet()
+        if g is None or not g.is_group() or (cur is not None and self.sheet_of(g) is not cur):
+            g = self.layer_for_sheet(cur) if cur is not None else self.root
         return g
 
     def set_active_container(self, g):
@@ -888,19 +1058,19 @@ class Document(QObject):
 
     # undo ------------------------------------------------------------
     def _snapshot(self):
-        return (clone_tree(self.root), [n.id for n in self.selection], self._active_id,
-                (self.width, self.height))
+        return (clone_tree(self.root), [n.id for n in self.selection], self._active_id, self._current_id)
 
     def _restore(self, snap):
-        root, sel_ids, active, size = snap
+        root, sel_ids, active, current = snap
         self.root = clone_tree(root)
-        self.width, self.height = size
         self._active_id = active
+        self._current_id = current
         self.selection = [n for n in (self.find(i) for i in sel_ids) if n is not None]
         self.restored.emit()
         self.structureChanged.emit()
         self.contentChanged.emit()
         self.selectionChanged.emit()
+        self.sheetChanged.emit()
 
     def begin_edit(self, merge_key=None):
         key, t = self._merge
@@ -1095,11 +1265,57 @@ class Document(QObject):
         with self.edit(structure=True):
             g = Group(name or self.new_name("Layer" if as_layer else "Folder"))
             if as_layer:
-                self.root.add(g)
+                self.current_sheet().add(g)
             else:
                 (parent or self.active_container()).add(g)
         self.set_selection([g])
         return g
+
+    def combine(self, nodes):
+        """Merge several paths into one compound path (each shape stays a sub-path; holes work)."""
+        paths = [l for n in nodes for l in (leaves(n) if n.is_group() else [n]) if l.kind == "path"]
+        if len(paths) < 2:
+            return None
+        paths.sort(key=lambda n: self._z_key(n))
+        top = paths[-1]
+        parent = top.parent
+        with self.edit(structure=True):
+            ref_idx = parent.children.index(top)
+            removed_before = sum(1 for p in paths if p.parent is parent and parent.children.index(p) < ref_idx)
+            subs = []
+            for p in paths:
+                subs.extend(sp.copy() for sp in p.subpaths)
+            new = PathNode(subs, top.style.copy(), self.new_name("Path"))
+            new.style.fill_rule = "evenodd"
+            new.opacity = top.opacity
+            for p in paths:
+                p.parent.children.remove(p)
+                p.parent = None
+            parent.add(new, ref_idx - removed_before)
+        self.set_selection([new])
+        return new
+
+    def break_apart(self, nodes):
+        """Split compound paths into one path per sub-path."""
+        paths = [l for n in nodes for l in (leaves(n) if n.is_group() else [n])
+                 if l.kind == "path" and len(l.subpaths) > 1]
+        if not paths:
+            return []
+        out = []
+        with self.edit(structure=True):
+            for p in paths:
+                parent = p.parent
+                idx = parent.children.index(p)
+                parent.children.remove(p)
+                p.parent = None
+                for k, sp in enumerate(p.subpaths):
+                    piece = PathNode([sp.copy()], p.style.copy(), self.new_name("Path"))
+                    piece.opacity = p.opacity
+                    piece.clip = [c.copy() for c in p.clip] if p.clip else None
+                    parent.add(piece, idx + k)
+                    out.append(piece)
+        self.set_selection(out)
+        return out
 
     # style ------------------------------------------------------------
     def style_targets(self, nodes):

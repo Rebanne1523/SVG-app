@@ -86,12 +86,13 @@ class SnapIndex:
                     self._add_point(s0, "Anchor")
                     self._add_point(s1, "Anchor")
         if page:
-            W, H = doc.width, doc.height
-            xs += [(0.0, "Page edge"), (W / 2, "Page center"), (W, "Page edge")]
-            ys += [(0.0, "Page edge"), (H / 2, "Page center"), (H, "Page edge")]
-            for p in ((0, 0), (W, 0), (0, H), (W, H)):
-                self._add_point(p, "Page corner")
-            self._add_point((W / 2, H / 2), "Page center")
+            for sh in doc.sheets():
+                x0, y0, W, H = sh.x, sh.y, sh.width, sh.height
+                xs += [(x0, "Sheet edge"), (x0 + W / 2, "Sheet center"), (x0 + W, "Sheet edge")]
+                ys += [(y0, "Sheet edge"), (y0 + H / 2, "Sheet center"), (y0 + H, "Sheet edge")]
+                for pt in ((x0, y0), (x0 + W, y0), (x0, y0 + H), (x0 + W, y0 + H)):
+                    self._add_point(pt, "Sheet corner")
+                self._add_point((x0 + W / 2, y0 + H / 2), "Sheet center")
         xs.sort()
         ys.sort()
         self.xs = xs

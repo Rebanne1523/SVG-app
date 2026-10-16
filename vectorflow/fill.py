@@ -102,7 +102,8 @@ def make_fill_node(poly, color, name="Fill"):
 
 
 def fill_at(doc, pt, color, gap=3.0):
-    res = find_region(collect_lines(doc), pt, gap, (doc.width, doc.height))
+    r = doc.sheets_rect()
+    res = find_region(collect_lines(doc), pt, gap, (r.right(), r.bottom()))
     if res.polygon is None:
         return None, res
     geoms = list(res.polygon.geoms) if isinstance(res.polygon, MultiPolygon) else [res.polygon]

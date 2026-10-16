@@ -78,7 +78,7 @@ def test_layers_drag_and_drop(win):
     c.set_tool("rect")
     for i in range(3):
         D.drag((100 + i * 120, 100), (180 + i * 120, 180))
-    l1 = d.root.children[0]
+    l1 = d.current_sheet().children[0]
     l2 = d.new_folder(as_layer=True)
     r1, r2, r3 = l1.children
     assert L.apply_drop([r1], l2, P.OnItem)
@@ -89,7 +89,7 @@ def test_layers_drag_and_drop(win):
     assert l2.children[-1] is g                           # in front of Rectangle 1
     assert not L.apply_drop([g], g, P.OnItem)             # can't drop a folder into itself
     d.undo()
-    assert len(list(walk(d.root))) == 6
+    assert len(list(walk(d.root))) == 7
     # canvas click <-> panel selection
     c.set_tool("select")
     D.click((120, 140))
@@ -188,7 +188,7 @@ def test_shortcuts(win, qapp):
 def test_large_document_is_responsive(win, qapp, tmp_path):
     import random
     import time
-    from vectorflow.svg_io import load_document
+    from vectorflow.project import open_document
     random.seed(3)
     parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="1500">']
     for g in range(5):
@@ -200,7 +200,7 @@ def test_large_document_is_responsive(win, qapp, tmp_path):
     f = tmp_path / "big.svg"
     f.write_text("".join(parts))
     t = time.time()
-    doc = load_document(str(f))
+    doc = open_document(str(f))
     win.set_document(doc)
     qapp.processEvents()
     doc.undo_stack.append(doc._snapshot())

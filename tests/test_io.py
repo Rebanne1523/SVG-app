@@ -4,7 +4,8 @@ import textwrap
 import pytest
 
 from vectorflow.model import MeasureNode, PathNode, walk
-from vectorflow.svg_io import export_svg_string, import_svg_bytes, load_document, parse_path_d, save_svg
+from vectorflow.project import open_document
+from vectorflow.svg_io import export_svg_string, import_svg_bytes, parse_path_d, save_svg
 
 SVG = textwrap.dedent("""\
     <svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
@@ -23,27 +24,29 @@ SVG = textwrap.dedent("""\
 
 def test_import_structure_and_styles(qapp):
     doc = import_svg_bytes(SVG)
-    assert (doc.width, doc.height) == (210, 297)
-    names = [c.name for c in doc.root.children]
+    sheet = doc.sheets()[0]
+    assert (sheet.width, sheet.height) == (210, 297)
+    names = [c.name for c in sheet.children]
     assert names == ["Back", "Hidden"]
-    assert not doc.root.children[1].visible
-    rect = doc.root.children[0].children[0]
+    assert not sheet.children[1].visible
+    rect = sheet.children[0].children[0]
     assert rect.style.fill == (255, 0, 0, 255) and rect.style.stroke == (0, 0, 255, 255)
     assert rect.bounds().getRect() == (10, 10, 100, 60)
-    clipped = doc.root.children[0].children[1]
+    clipped = sheet.children[0].children[1]
     assert clipped.clip  # clip-path survived
 
 
 def test_roundtrip_keeps_layers_and_measure(qapp):
     doc = import_svg_bytes(SVG)
     m = MeasureNode((0, 0), (100, 0), 30, "100", "leg", "line")
-    doc.root.children[0].add(m)
-    doc.root.children[0].children[0].style.arrow_end = "triangle"
-    doc.root.children[0].children[0].style.dash = [4.0, 3.0]
+    layer = doc.sheets()[0].children[0]
+    layer.add(m)
+    layer.children[0].style.arrow_end = "triangle"
+    layer.children[0].style.dash = [4.0, 3.0]
     text = export_svg_string(doc)
     assert 'inkscape:groupmode="layer"' in text
     doc2 = import_svg_bytes(text)
-    assert [c.name for c in doc2.root.children] == ["Back", "Hidden"]
+    assert [c.name for c in doc2.sheets()[0].children] == ["Back", "Hidden"]
     ms = [n for n in walk(doc2.root) if n.kind == "measure"]
     assert len(ms) == 1 and ms[0].text == "100" and ms[0].mode_b == "line" and ms[0].offset == 30
     p = [n for n in walk(doc2.root) if n.kind == "path"][0]
@@ -73,8 +76,9 @@ def test_pdf_import(qapp, tmp_path):
     page.insert_text((30, 150), "Hello", fontsize=20)
     path = tmp_path / "a.pdf"
     pdf.save(str(path))
-    doc = load_document(str(path))
-    assert (doc.width, doc.height) == (300, 200)
+    doc = open_document(str(path))
+    assert [s.name for s in doc.sheets()] == ["a"]           # named exactly like the PDF
+    assert (doc.sheets()[0].width, doc.sheets()[0].height) == (300, 200)
     kinds = [n.kind for n in walk(doc.root)]
     assert kinds.count("path") >= 2
 
@@ -83,5 +87,5 @@ def test_save_and_open(qapp, tmp_path):
     doc = import_svg_bytes(SVG)
     out = tmp_path / "o.svg"
     save_svg(doc, str(out))
-    again = load_document(str(out))
+    again = open_document(str(out))
     assert len(list(walk(again.root))) == len(list(walk(doc.root)))

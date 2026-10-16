@@ -129,6 +129,17 @@ class SelectTool(Tool):
         self.start_v = ev.vp
         self.dragging = False
         self.pending_toggle = None
+        lab = self.canvas.hit_sheet_label(ev.vp)
+        if lab is not None:
+            # dragging a sheet's name tag moves the whole sheet with everything on it
+            self.doc.set_selection([])
+            self.doc.set_current_sheet(lab)
+            self.mode = "sheet"
+            self.sheet = lab
+            self.doc.begin_edit()
+            self.orig = {lab: lab.get_geom()}
+            self.nodes = [lab]
+            return
         h = None if ev.alt else self.hit_handle(ev.vp)
         if h is not None:
             self.nodes = movable(self.doc.selection)
@@ -158,6 +169,9 @@ class SelectTool(Tool):
         else:
             if not ev.shift:
                 self.doc.set_selection([])
+            under = self.doc.sheet_at(ev.p)
+            if under is not None:
+                self.doc.set_current_sheet(under)   # clicking an empty spot of a page selects that sheet
             self.mode = "marquee"
             self.marquee = QRectF(QPointF(*ev.p), QPointF(*ev.p))
 
@@ -188,7 +202,14 @@ class SelectTool(Tool):
             self.dragging = True
             if self.mode == "move" and self.copy_on_drag:
                 self._copy_selection()
-        if self.mode == "move":
+        if self.mode == "sheet":
+            dx, dy = ev.x - self.start[0], ev.y - self.start[1]
+            if ev.shift:
+                dx, dy = constrain_angle_projected((0, 0), (dx, dy), 90.0)
+            self.sheet.set_geom(self.orig[self.sheet])
+            self.sheet.transform(affine.translate(dx, dy))
+            self.say(f"Sheet position  x {self.sheet.x:.1f}  y {self.sheet.y:.1f}")
+        elif self.mode == "move":
             self._do_move(ev)
         elif self.mode == "scale":
             self._do_scale(ev)
@@ -197,6 +218,10 @@ class SelectTool(Tool):
 
     def _hover(self, ev):
         c = self.canvas
+        if c.hit_sheet_label(ev.vp) is not None:
+            c.setCursor(Qt.SizeAllCursor)
+            c.hover = None
+            return
         h = self.hit_handle(ev.vp)
         if h is not None:
             if h[0] == "scale":
@@ -336,6 +361,15 @@ class SelectTool(Tool):
                     found = self.doc.selection + [n for n in found if n not in self.doc.selection]
                 self.doc.set_selection(found)
             return
+        if mode == "sheet":
+            if self.dragging:
+                self.doc.end_edit(True)
+            else:
+                self.doc.cancel_edit()
+            self.mode = None
+            self.dragging = False
+            self.say("")
+            return
         if mode in ("move", "scale", "rotate"):
             changed = self.dragging
             if not changed and self.pending_toggle is not None and mode == "move":
@@ -347,7 +381,10 @@ class SelectTool(Tool):
             struct = getattr(self, "_structure_changed", False)
             self._structure_changed = False
             if changed:
+                if mode == "move" and self.doc.reassign_to_sheets(self.nodes):
+                    struct = True      # dropped onto another sheet -> it now belongs to that sheet
                 self.doc.end_edit(True, structure=struct)
+                self.doc.set_selection(self.doc.selection)
             else:
                 self.doc.cancel_edit()
             self.mode = None
@@ -374,7 +411,7 @@ class SelectTool(Tool):
                     for n in nodes:
                         n.transform(affine.translate(*d))
                 return True
-        if key == Qt.Key_Escape and self.mode in ("move", "scale", "rotate"):
+        if key == Qt.Key_Escape and self.mode in ("move", "scale", "rotate", "sheet"):
             self._restore()
             self.doc.cancel_edit()
             self.mode = None
@@ -482,10 +519,34 @@ class DirectTool(Tool):
 
     def __init__(self, canvas):
         super().__init__(canvas)
+        self.scroll_mode = "path"   # "path": follow the path, "area": nearby points
         self.reset()
+
+    def options_widget(self, parent=None):
+        w = QWidget(parent)
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(4, 0, 4, 0)
+        lay.addWidget(QLabel("Scroll over a point selects:"))
+        cb = QComboBox()
+        cb.addItem("Connected points (along the path)", "path")
+        cb.addItem("Nearby points (area)", "area")
+        cb.setCurrentIndex(0 if self.scroll_mode == "path" else 1)
+        cb.setToolTip("Hover a point and scroll up/down.\nConnected: grows along the path to BOTH sides of the "
+                      "point you started on.\nArea: grows to every point near it, like Inkscape.")
+        cb.currentIndexChanged.connect(lambda i: self._set_scroll_mode(cb.itemData(i)))
+        lay.addWidget(cb)
+        return w
+
+    def _set_scroll_mode(self, mode):
+        self.scroll_mode = mode
+        self.scroll_origin = None
+        self.scroll_steps = 0
 
     def reset(self):
         self.sel = []  # list of (node, anchor)
+        self.scroll_origin = None
+        self.scroll_steps = 0
+        self._acc = 0
         self.mode = None
         self.start = None
         self.start_v = None
@@ -578,6 +639,7 @@ class DirectTool(Tool):
         self.start_v = ev.vp
         self.dragging = False
         self.mode = None
+        self.scroll_origin = None
         h = self.hit_handle(ev.vp)
         if h is not None:
             n, sp, a, which = h
@@ -758,6 +820,61 @@ class DirectTool(Tool):
                 new = split_segment(sp, i, t)
                 n.touch()
             self.sel = [(n, new)]
+
+    # --- scroll-wheel point selection ----------------------------------------------------
+    def wheel(self, ev, delta):
+        """Hover a point and scroll: grow (up) / shrink (down) the selection from that point,
+        either along the path to both sides ("path") or to all nearby points ("area")."""
+        if not self.paths():
+            return False
+        hit = self.hit_anchor(ev.vp)
+        if hit is None:
+            o = self.scroll_origin
+            if o is None or dist(self.canvas.to_view(o[2].p), ev.vp) > 40:
+                self.scroll_origin = None
+                return False
+        elif self.scroll_origin is None or hit[2] is not self.scroll_origin[2]:
+            self.scroll_origin = hit
+            self.scroll_steps = 0
+            self._acc = 0
+            self.sel = [(hit[0], hit[2])]
+        self._acc += delta
+        notches = int(self._acc / 120)
+        if notches == 0:
+            return True
+        self._acc -= notches * 120
+        self.scroll_steps = max(0, self.scroll_steps + notches)
+        self._apply_scroll_selection()
+        return True
+
+    def _apply_scroll_selection(self):
+        node, sp, a = self.scroll_origin
+        steps = self.scroll_steps
+        if self.scroll_mode == "path":
+            anchors = sp.anchors
+            n = len(anchors)
+            idx = next((i for i, x in enumerate(anchors) if x is a), 0)
+            chosen = [a]
+            for k in range(1, min(steps, n) + 1):
+                for direction in (1, -1):
+                    j = idx + direction * k
+                    if sp.closed:
+                        j %= n
+                    elif not 0 <= j < n:
+                        continue
+                    if not any(x is anchors[j] for x in chosen):
+                        chosen.append(anchors[j])
+            self.sel = [(node, x) for x in chosen]
+        else:
+            radius = 28.0 / self.canvas.zoom * steps
+            res = []
+            for nd in self.paths():
+                for sub in nd.subpaths:
+                    for x in sub.anchors:
+                        if x is a or dist(x.p, a.p) <= radius:
+                            res.append((nd, x))
+            self.sel = res
+        self.say(f"{len(self.sel)} point(s) selected")
 
     def on_delete(self):
         if not self.sel:

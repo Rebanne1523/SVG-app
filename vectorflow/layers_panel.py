@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel, Q
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .icons import swatch_icon, ui_icon
+from .model import Sheet
 
 COL_NAME, COL_EYE, COL_LOCK = 0, 1, 2
 
@@ -150,6 +151,7 @@ class LayersPanel(QWidget):
         d = self.get_doc()
         self._doc = d
         d.structureChanged.connect(self.rebuild)
+        d.sheetChanged.connect(self.rebuild)
         d.selectionChanged.connect(self.sync_from_doc)
         d.contentChanged.connect(self.refresh_icons)
 
@@ -157,7 +159,8 @@ class LayersPanel(QWidget):
         d = getattr(self, "_doc", None)
         if d is None:
             return
-        for sig, slot in ((d.structureChanged, self.rebuild), (d.selectionChanged, self.sync_from_doc),
+        for sig, slot in ((d.structureChanged, self.rebuild), (d.sheetChanged, self.rebuild),
+                          (d.selectionChanged, self.sync_from_doc),
                           (d.contentChanged, self.refresh_icons)):
             try:
                 sig.disconnect(slot)
@@ -193,7 +196,7 @@ class LayersPanel(QWidget):
         it.setFont(COL_NAME, f)
         it.setForeground(COL_NAME, QBrush(QColor(235, 235, 235) if n.visible else QColor(120, 120, 120)))
         if n.is_group():
-            it.setIcon(COL_NAME, ui_icon("folder" if n.parent is not None and n.parent.parent is not None else "layer", 16))
+            it.setIcon(COL_NAME, ui_icon("layer" if isinstance(n.parent, Sheet) else "folder", 16))
         else:
             st = getattr(n, "style", None)
             if n.kind == "measure":
@@ -229,7 +232,8 @@ class LayersPanel(QWidget):
         self.tree.clear()
         self.item_of = {}
         self._hl = None
-        for c in reversed(d.root.children):
+        cur = d.current_sheet()
+        for c in reversed(cur.children if cur is not None else []):
             it = self._make_item(c)
             self.tree.addTopLevelItem(it)
             if c.is_group() and c.expanded:
@@ -267,11 +271,14 @@ class LayersPanel(QWidget):
         it = self.item_of.get(id(node))
         if it is not None:
             return it
+        d = self.get_doc()
+        if d.sheet_of(node) is not d.current_sheet():
+            return None
         chain = [node] + list(node.ancestors())
         chain.reverse()
-        # chain[0] is the root group
+        # chain[0] is the root group, chain[1] the sheet (not shown: the panel lists the sheet's layers)
         cur = None
-        for n in chain[1:]:
+        for n in chain[2:]:
             it = self.item_of.get(id(n))
             if it is None and cur is not None:
                 self._populate(cur)
@@ -301,7 +308,7 @@ class LayersPanel(QWidget):
             self.tree.scrollToItem(last)
         target = d.active_container()
         self._highlight(target)
-        name = target.name if target is not d.root else "(root)"
+        name = target.name
         self.target_label.setText(f"Drawing in: <b>{name}</b>")
         self._syncing = False
         self.refresh_icons()
@@ -318,14 +325,13 @@ class LayersPanel(QWidget):
         self.sync_light()
 
     def _highlight(self, target):
-        d = self.get_doc()
         prev = getattr(self, "_hl", None)
         if prev is not None:
             try:
                 prev.setBackground(COL_NAME, QBrush())
             except RuntimeError:
                 pass
-        it = self.item_of.get(id(target)) if target is not d.root else None
+        it = self.item_of.get(id(target))
         if it is not None:
             it.setBackground(COL_NAME, QBrush(QColor(60, 90, 130, 90)))
         self._hl = it
@@ -334,7 +340,7 @@ class LayersPanel(QWidget):
         d = self.get_doc()
         target = d.active_container()
         self._highlight(target)
-        self.target_label.setText(f"Drawing in: <b>{target.name if target is not d.root else '(root)'}</b>")
+        self.target_label.setText(f"Drawing in: <b>{target.name}</b>")
         self.refresh_icons()
 
     def _expanded(self, it):
@@ -386,7 +392,7 @@ class LayersPanel(QWidget):
             self.get_doc().group(sel)
 
     def ungroup_selection(self):
-        gs = [n for n in self._targets() if n.is_group() and n.parent is not self.get_doc().root]
+        gs = [n for n in self._targets() if n.is_group() and not self.get_doc().is_layer(n)]
         if gs:
             self.get_doc().ungroup(gs)
 
@@ -449,7 +455,7 @@ class LayersPanel(QWidget):
             return False
         P = QAbstractItemView.DropIndicatorPosition
         if target is None or pos == P.OnViewport:
-            parent, index = d.root, 0
+            parent, index = d.current_sheet(), 0
         elif pos == P.OnItem and target.is_group():
             parent, index = target, len(target.children)
         elif pos in (P.AboveItem, P.OnItem):
@@ -459,9 +465,9 @@ class LayersPanel(QWidget):
             parent = target.parent
             index = parent.children.index(target)
         if parent is None:
-            parent, index = d.root, 0
+            parent, index = d.current_sheet(), 0
         ok = d.move_nodes(nodes, parent, index)
-        if ok and parent is not d.root:
+        if ok:
             parent.expanded = True
         if ok:
             d.set_selection(nodes)

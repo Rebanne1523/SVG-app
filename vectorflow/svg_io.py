@@ -5,6 +5,7 @@ import base64
 import gzip
 import json
 import math
+import os
 import re
 import xml.etree.ElementTree as ET
 
@@ -554,19 +555,25 @@ class SvgImporter:
             vh = parse_length(h, 600.0) if h else 600.0
         self.vb_w, self.vb_h = vw, vh
         self.doc = Document(vw, vh)
-        self.doc.root = Group("root")
+        sheet = self.doc.sheets()[0]
+        sheet.children = []
         ctm = affine.translate(-minx, -miny)
         props = self._resolve(root, {})
         props.pop("display", None)
-        self._children(root, self.doc.root, props, ctm)
-        if not self.doc.root.children:
-            self.doc.root.add(Group("Layer 1"))
-        # make sure we always have somewhere to draw
-        tops = [c for c in self.doc.root.children if c.is_group()]
-        total = sum(1 for _ in walk(self.doc.root))
-        for t in tops:
+        self._children(root, sheet, props, ctm)
+        if not sheet.children:
+            sheet.add(Group("Layer 1"))
+        elif any(not c.is_group() for c in sheet.children):
+            # a plain SVG / PDF page has loose objects: put everything in one layer so the layer
+            # panel always has a layer to work with
+            layer = Group("Layer 1")
+            for c in list(sheet.children):
+                layer.add(c)          # add() detaches it from the sheet
+            sheet.add(layer)
+        total = sum(1 for _ in walk(sheet))
+        for t in (c for c in sheet.children if c.is_group()):
             t.expanded = total < 400
-        self.doc._active_id = (tops[-1] if tops else self.doc.root).id
+        self.doc._active_id = self.doc.layer_for_sheet(sheet).id
         return self.doc
 
     def _children(self, el, parent, props, ctm):
@@ -769,6 +776,7 @@ class SvgImporter:
 
 
 def import_svg_bytes(data):
+    """Parse SVG bytes into a Document holding a single sheet."""
     imp = SvgImporter(data)
     doc = imp.build()
     doc.warnings = sorted(imp.warnings)
@@ -776,38 +784,46 @@ def import_svg_bytes(data):
     return doc
 
 
-def pdf_page_count(path):
+def _detach_sheet(doc, name, source, pt_per_unit):
+    sheet = doc.sheets()[0]
+    doc.root.children.remove(sheet)
+    sheet.parent = None
+    sheet.name = name
+    sheet.source = source
+    sheet.pt_per_unit = pt_per_unit
+    sheet.x = sheet.y = 0.0
+    return sheet
+
+
+def sheet_from_svg_bytes(data, name, source=None, pt_per_unit=0.75):
+    doc = import_svg_bytes(data)
+    return _detach_sheet(doc, name, source, pt_per_unit), doc.warnings
+
+
+def sheets_from_pdf(path):
+    """One detached Sheet per PDF page. A one-page PDF gives a sheet named exactly like the file."""
     import pymupdf
-    with pymupdf.open(path) as d:
-        return d.page_count
+    stem = os.path.splitext(os.path.basename(path))[0]
+    sheets, warnings = [], []
+    with pymupdf.open(path) as pdf:
+        n = pdf.page_count
+        for i in range(n):
+            svg = pdf[i].get_svg_image(text_as_path=True)
+            name = stem if n == 1 else f"{stem} - {i + 1}"
+            sheet, w = sheet_from_svg_bytes(svg, name, path, pt_per_unit=1.0)
+            sheets.append(sheet)
+            warnings.extend(w)
+    return sheets, sorted(set(warnings))
 
 
-def import_pdf(path, page=0):
-    import pymupdf
-    with pymupdf.open(path) as d:
-        if page < 0 or page >= d.page_count:
-            raise ImportError_("Page out of range")
-        svg = d[page].get_svg_image(text_as_path=True)
-    doc = import_svg_bytes(svg)
-    doc.modified = False
-    return doc
-
-
-def load_document(path, page=0):
-    low = path.lower()
-    if low.endswith(".pdf"):
-        doc = import_pdf(path, page)
-        doc.path = None
-        doc.source = path
-        return doc
+def sheets_from_svg_file(path):
     with open(path, "rb") as f:
         data = f.read()
-    if low.endswith(".svgz") or data[:2] == b"\x1f\x8b":
+    if path.lower().endswith(".svgz") or data[:2] == b"\x1f\x8b":
         data = gzip.decompress(data)
-    doc = import_svg_bytes(data)
-    doc.path = path if low.endswith(".svg") else None
-    doc.source = path
-    return doc
+    stem = os.path.splitext(os.path.basename(path))[0]
+    sheet, warnings = sheet_from_svg_bytes(data, stem, path)
+    return [sheet], warnings
 
 
 # ---------------------------------------------------------------- export
@@ -842,8 +858,11 @@ def q(ns, name):
 
 
 class SvgExporter:
-    def __init__(self, doc):
+    """Writes ONE sheet as a standalone SVG (coordinates relative to the sheet's top-left corner)."""
+
+    def __init__(self, doc, sheet=None):
         self.doc = doc
+        self.sheet = sheet or doc.current_sheet()
         self.clip_n = 0
         self.defs = None
 
@@ -853,12 +872,18 @@ class SvgExporter:
         ET.register_namespace("sodipodi", SOD_NS)
         ET.register_namespace("xlink", XLINK_NS)
         ET.register_namespace("vf", VF_NS)
-        d = self.doc
+        sh = self.sheet
         svg = ET.Element(q(SVG_NS, "svg"), {
-            "width": fmt(d.width), "height": fmt(d.height),
-            "viewBox": f"0 0 {fmt(d.width)} {fmt(d.height)}", "version": "1.1"})
+            "width": fmt(sh.width), "height": fmt(sh.height),
+            "viewBox": f"0 0 {fmt(sh.width)} {fmt(sh.height)}", "version": "1.1"})
         self.defs = ET.SubElement(svg, q(SVG_NS, "defs"))
-        for ch in d.root.children:
+        kids = sh.children
+        if sh.x or sh.y:
+            from .model import clone_tree
+            kids = [clone_tree(c) for c in sh.children]
+            for k in kids:
+                k.transform(affine.translate(-sh.x, -sh.y))
+        for ch in kids:
             self._node(ch, svg, top=True)
         if not len(self.defs):
             svg.remove(self.defs)
@@ -1045,14 +1070,14 @@ def qpath_to_d(p):
     return " ".join(out)
 
 
-def export_svg_string(doc):
-    svg = SvgExporter(doc).build()
+def export_svg_string(doc, sheet=None):
+    svg = SvgExporter(doc, sheet).build()
     ET.indent(svg, space="  ")
     return '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' + ET.tostring(svg, encoding="unicode")
 
 
-def save_svg(doc, path):
-    s = export_svg_string(doc)
+def save_svg(doc, path, sheet=None):
+    s = export_svg_string(doc, sheet)
     if path.lower().endswith(".svgz"):
         with gzip.open(path, "wb") as f:
             f.write(s.encode("utf-8"))

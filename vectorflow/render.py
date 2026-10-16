@@ -194,28 +194,57 @@ def render_document(painter: QPainter, doc, skip=None, cull=None):
     painter.setOpacity(1.0)
 
 
-def export_png(doc, path, scale=1.0, transparent=True):
+def render_sheet(painter: QPainter, sheet):
+    """Paint one sheet with its top-left corner at the painter origin, clipped to the page."""
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+    painter.translate(-sheet.x, -sheet.y)
+    painter.setClipRect(sheet.rect())
+    draw_node(painter, sheet)
+    painter.restore()
+    painter.setOpacity(1.0)
+
+
+def sheet_image(sheet, scale=1.0, transparent=False):
     from PySide6.QtGui import QImage
-    w, h = max(1, int(round(doc.width * scale))), max(1, int(round(doc.height * scale)))
+    w, h = max(1, int(round(sheet.width * scale))), max(1, int(round(sheet.height * scale)))
     img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
     img.fill(Qt.transparent if transparent else Qt.white)
     p = QPainter(img)
     p.scale(scale, scale)
-    render_document(p, doc)
+    render_sheet(p, sheet)
     p.end()
-    return img.save(path)
+    return img
 
 
-def export_pdf(doc, path):
+def sheet_thumbnail(sheet, max_w=220, max_h=160):
+    s = min(max_w / max(sheet.width, 1.0), max_h / max(sheet.height, 1.0))
+    return sheet_image(sheet, s)
+
+
+def export_sheet_png(sheet, path, scale=1.0, transparent=True):
+    return sheet_image(sheet, scale, transparent).save(path)
+
+
+def export_sheets_pdf(sheets, path):
+    """Vector PDF with one page per sheet; each page keeps its own size (1 unit = pt_per_unit points)."""
     from PySide6.QtCore import QMarginsF, QSizeF
     from PySide6.QtGui import QPageSize, QPdfWriter
     w = QPdfWriter(path)
     w.setResolution(72)
-    w.setPageSize(QPageSize(QSizeF(doc.width * 72 / 96, doc.height * 72 / 96), QPageSize.Point))
-    w.setPageMargins(QMarginsF(0, 0, 0, 0))
-    p = QPainter(w)
-    # QPdfWriter at 72 dpi: 1 device unit == 1 pt; document units are px (96 dpi)
-    p.scale(72 / 96.0, 72 / 96.0)
-    render_document(p, doc)
-    p.end()
+    painter = None
+    for sh in sheets:
+        w.setPageSize(QPageSize(QSizeF(sh.width * sh.pt_per_unit, sh.height * sh.pt_per_unit), QPageSize.Point))
+        w.setPageMargins(QMarginsF(0, 0, 0, 0))
+        if painter is None:
+            painter = QPainter(w)
+        else:
+            w.newPage()
+        painter.save()
+        painter.scale(sh.pt_per_unit, sh.pt_per_unit)
+        render_sheet(painter, sh)
+        painter.restore()
+    if painter is not None:
+        painter.end()
     return True

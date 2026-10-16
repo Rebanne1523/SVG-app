@@ -3,25 +3,31 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QRectF, QSettings, QSize, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence, QPalette
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
-                               QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
-                               QMessageBox, QToolBar, QWidget, QDoubleSpinBox)
+                               QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+                               QSplitter, QToolBar, QWidget, QDoubleSpinBox, QLineEdit)
 
 from . import __version__, affine
 from .canvas import Canvas
 from .icons import app_icon, tool_icon
 from .layers_panel import LayersPanel
-from .model import Document, fresh_copy
+from .export_dialog import ExportDialog
+from .exporting import FORMATS, export_selection, export_units, plan_unit_paths, safe_filename
+from .model import Document, common_ancestors_pruned, fresh_copy
+from .project import PROJECT_EXT, import_into, open_document, save_project
 from .props import StyleBar
-from .render import export_pdf, export_png
-from .svg_io import ImportError_, load_document, pdf_page_count, save_svg
+from .sheets_panel import SheetsPanel
+from .svg_io import ImportError_
+from .transformbar import TransformBar
 from .tools_draw import PenTool, PencilTool, ShapeTool, TextTool
 from .tools_other import BucketTool, HandTool, MeasureTool, ZoomTool
 from .tools_select import DirectTool, SelectTool
 
-OPEN_FILTER = "Vector files (*.svg *.svgz *.pdf);;SVG (*.svg *.svgz);;PDF (*.pdf);;All files (*)"
+OPEN_FILTER = ("Projects and vector files (*.vflow *.svg *.svgz *.pdf);;VectorFlow project (*.vflow);;"
+               "SVG (*.svg *.svgz);;PDF (*.pdf);;All files (*)")
+IMPORT_FILTER = "PDF and SVG (*.pdf *.svg *.svgz);;PDF (*.pdf);;SVG (*.svg *.svgz);;All files (*)"
 
 SHORTCUTS_HELP = """
 <h3>Tools (same letters as Photoshop where possible)</h3>
@@ -35,6 +41,17 @@ SHORTCUTS_HELP = """
 <tr><td><b>G</b></td><td>Paint Bucket (Alt+click recolours a shape)</td></tr>
 <tr><td><b>I</b></td><td>Measure &mdash; A, B, offset, type the value; scroll flips the arrow</td></tr>
 <tr><td><b>H</b> / <b>Z</b></td><td>Hand / Zoom (Space = temporary hand)</td></tr>
+</table>
+<h3>Sheets, files and export</h3>
+<table cellpadding=3>
+<tr><td><b>Ctrl+I</b></td><td>Import PDFs / SVGs: every page becomes its own sheet (named like the file)</td></tr>
+<tr><td><b>Ctrl+S</b></td><td>Save the project (.vflow, all sheets in one file)</td></tr>
+<tr><td><b>Ctrl+Shift+E</b></td><td>Export pages (pick them; drag one tile onto another for a multi-page PDF) or only the selection</td></tr>
+<tr><td><b>Ctrl+V</b> / <b>Ctrl+Shift+V</b></td><td>Paste centred on the mouse / paste at the same position on the selected sheet</td></tr>
+<tr><td><b>Ctrl+K</b> / <b>Ctrl+Shift+K</b></td><td>Combine paths into one compound path / break it apart</td></tr>
+<tr><td><b>Ctrl+Shift+0</b></td><td>Zoom to the current sheet</td></tr>
+<tr><td>Drag a sheet's name tag</td><td>Move the whole sheet. Drag a vector onto another sheet and it moves to that sheet.</td></tr>
+<tr><td>Scroll over a point (A tool)</td><td>Grow / shrink the selection along the path, to both sides</td></tr>
 </table>
 <h3>Modifiers</h3>
 <table cellpadding=3>
@@ -136,8 +153,16 @@ class MainWindow(QMainWindow):
         self.canvas.text_defaults["family"] = sysfont
         self._build_tools()
         self.layers = LayersPanel(lambda: self.doc)
-        dock = QDockWidget("Layers", self)
-        dock.setWidget(self.layers)
+        self.sheets_panel = SheetsPanel(lambda: self.doc)
+        self.sheets_panel.zoomRequested.connect(lambda sh: self.canvas.fit_sheet(sh))
+        split = QSplitter(Qt.Vertical)
+        split.addWidget(self.sheets_panel)
+        split.addWidget(self.layers)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setChildrenCollapsible(False)
+        dock = QDockWidget("Sheets and layers", self)
+        dock.setWidget(split)
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         dock.setMinimumWidth(270)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
@@ -208,6 +233,9 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.style_bar.bar1)
         self.addToolBarBreak(Qt.TopToolBarArea)
         self.addToolBar(Qt.TopToolBarArea, self.style_bar.bar2)
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.xform = TransformBar(lambda: self.canvas)
+        self.addToolBar(Qt.TopToolBarArea, self.xform.bar)
         self.canvas.toolChanged.connect(self._tool_changed)
 
     def _tool_changed(self, name):
@@ -243,16 +271,14 @@ class MainWindow(QMainWindow):
     def _build_actions(self):
         mb = self.menuBar()
         f = mb.addMenu("&File")
-        self._act(f, "&New…", self.new_doc, "Ctrl+N")
+        self._act(f, "&New project…", self.new_doc, "Ctrl+N")
         self._act(f, "&Open…", self.open_dialog, "Ctrl+O")
+        self._act(f, "&Import PDF / SVG as sheets…", self.import_dialog, "Ctrl+I")
         f.addSeparator()
-        self._act(f, "&Save", self.save, "Ctrl+S")
-        self._act(f, "Save &As…", self.save_as, "Ctrl+Shift+S")
+        self._act(f, "&Save project", self.save, "Ctrl+S")
+        self._act(f, "Save project &as…", self.save_as, "Ctrl+Shift+S")
         f.addSeparator()
-        self._act(f, "Export &PNG…", self.export_png_dialog, "Ctrl+Alt+Shift+S")
-        self._act(f, "Export P&DF…", self.export_pdf_dialog, "Ctrl+Alt+P")
-        f.addSeparator()
-        self._act(f, "Document &properties…", self.doc_props)
+        self._act(f, "&Export…", self.export_dialog, "Ctrl+Shift+E")
         f.addSeparator()
         self._act(f, "&Quit", self.close, "Ctrl+Q")
 
@@ -262,7 +288,8 @@ class MainWindow(QMainWindow):
         e.addSeparator()
         self._act(e, "Cu&t", self.cut, "Ctrl+X")
         self._act(e, "&Copy", self.copy, "Ctrl+C")
-        self._act(e, "&Paste", self.paste, "Ctrl+V")
+        self._act(e, "&Paste (at the mouse)", lambda: self.paste(False), "Ctrl+V")
+        self._act(e, "Paste in &place (same position on the sheet)", lambda: self.paste(True), "Ctrl+Shift+V")
         self._act(e, "&Duplicate", self.duplicate, "Ctrl+J")
         self._act(e, "De&lete", self.delete, ["Delete", "Backspace"])
         e.addSeparator()
@@ -271,6 +298,8 @@ class MainWindow(QMainWindow):
         e.addSeparator()
         self._act(e, "&Group into folder", lambda: self.layers.group_selection(), "Ctrl+G")
         self._act(e, "&Ungroup", lambda: self.layers.ungroup_selection(), "Ctrl+Shift+G")
+        self._act(e, "Co&mbine paths", self.combine, "Ctrl+K")
+        self._act(e, "Break &apart paths", self.break_apart, "Ctrl+Shift+K")
         ar = e.addMenu("&Arrange")
         self._act(ar, "Bring to front", lambda: self.arrange("front"), "Ctrl+Shift+]")
         self._act(ar, "Bring forward", lambda: self.arrange("forward"), "Ctrl+]")
@@ -291,10 +320,16 @@ class MainWindow(QMainWindow):
         self._act(v, "&Fit page", self.canvas.fit_view, "Ctrl+0")
         self._act(v, "Zoom to &selection", self.canvas.fit_selection, "Ctrl+Alt+0")
         self._act(v, "&Actual size (100%)", lambda: self.canvas.set_zoom(1.0), "Ctrl+1")
+        self._act(v, "Zoom to &sheet", lambda: self.canvas.fit_sheet(), "Ctrl+Shift+0")
         v.addSeparator()
         self.snap_act = self._act(v, "&Snapping", self._set_snap, "Ctrl+Shift+;", checkable=True)
         self.snap_act.setChecked(True)
         v.addAction(self.layers_dock.toggleViewAction())
+
+        sm = mb.addMenu("S&heets")
+        self._act(sm, "&Add blank sheet", self.sheets_panel.add_sheet)
+        self._act(sm, "&Delete current sheet", self.sheets_panel.delete_current)
+        self._act(sm, "Sheet &properties…", self.sheet_props)
 
         h = mb.addMenu("&Help")
         self._act(h, "&Keyboard shortcuts", self.show_help, "F1")
@@ -332,12 +367,19 @@ class MainWindow(QMainWindow):
         d.contentChanged.connect(self.style_bar.refresh)
         d.metaChanged.connect(self._update_title)
         d.restored.connect(self.style_bar.refresh)
+        d.selectionChanged.connect(self.xform.refresh)
+        d.contentChanged.connect(self.xform.refresh)
+        d.restored.connect(self.xform.refresh)
+        d.sheetChanged.connect(self._update_title)
         self.style_bar.refresh()
+        self.xform.refresh()
 
     def _unwire_doc(self):
         d = self.doc
         for sig, slot in ((d.selectionChanged, self.style_bar.refresh), (d.contentChanged, self.style_bar.refresh),
-                          (d.metaChanged, self._update_title), (d.restored, self.style_bar.refresh)):
+                          (d.metaChanged, self._update_title), (d.restored, self.style_bar.refresh),
+                          (d.selectionChanged, self.xform.refresh), (d.contentChanged, self.xform.refresh),
+                          (d.restored, self.xform.refresh), (d.sheetChanged, self._update_title)):
             try:
                 sig.disconnect(slot)
             except (RuntimeError, TypeError):
@@ -348,6 +390,7 @@ class MainWindow(QMainWindow):
         self.doc = doc
         self.canvas.set_document(doc)
         self.layers.set_document()
+        self.sheets_panel.set_document()
         self._wire_doc()
         self._update_title()
         self.canvas.fit_view()
@@ -357,6 +400,28 @@ class MainWindow(QMainWindow):
         name = os.path.basename(self.doc.path) if self.doc.path else (
             os.path.basename(self.doc.source) if self.doc.source else "Untitled")
         self.setWindowTitle(f"{'*' if self.doc.modified else ''}{name} — VectorFlow")
+
+    # ------------------------------------------------------------ remembered folder
+    @staticmethod
+    def settings():
+        return QSettings("VectorFlow", "VectorFlow")
+
+    def last_dir(self):
+        """Last folder used in any open / import / save / export dialog (default: Documents)."""
+        d = self.settings().value("lastDir", "", type=str)
+        if d and os.path.isdir(d):
+            return d
+        docs = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+        return docs if docs and os.path.isdir(docs) else os.path.expanduser("~")
+
+    def remember_dir(self, path):
+        if not path:
+            return
+        folder = path if os.path.isdir(path) else os.path.dirname(path)
+        if folder and os.path.isdir(folder):
+            st = self.settings()
+            st.setValue("lastDir", folder)
+            st.sync()
 
     # ------------------------------------------------------------ files
     def maybe_save(self):
@@ -373,43 +438,66 @@ class MainWindow(QMainWindow):
     def new_doc(self):
         if not self.maybe_save():
             return
-        dlg = NewDocDialog(self)
+        dlg = NewDocDialog(self, title="New project (size of the first sheet)")
         if dlg.exec() == QDialog.Accepted:
             self.set_document(Document(dlg.w.value(), dlg.h.value()))
 
     def open_dialog(self):
         if not self.maybe_save():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open", "", OPEN_FILTER)
-        if path:
-            self.open_path(path, check_save=False)
+        paths, _ = QFileDialog.getOpenFileNames(self, "Open", self.last_dir(), OPEN_FILTER)
+        if paths:
+            self.remember_dir(paths[0])
+            self.open_paths(paths, check_save=False)
 
-    def open_path(self, path, check_save=True):
+    def open_paths(self, paths, check_save=True):
+        """Open files as a NEW project (every PDF page / SVG becomes a sheet)."""
+        if isinstance(paths, str):
+            paths = [paths]
         if check_save and not self.maybe_save():
             return
-        page = 0
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            if path.lower().endswith(".pdf"):
-                n = pdf_page_count(path)
-                if n > 1:
-                    page, ok = QInputDialog.getInt(self, "PDF page", f"This PDF has {n} pages. Open page:", 1, 1, n)
-                    if not ok:
-                        return
-                    page -= 1
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                doc = load_document(path, page)
-            finally:
-                QApplication.restoreOverrideCursor()
+            doc = open_document(paths)
         except (ImportError_, OSError, ValueError) as e:
+            QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Could not open file", str(e))
             return
         except Exception as e:  # corrupt PDF etc.
+            QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Could not open file", f"{type(e).__name__}: {e}")
             return
+        QApplication.restoreOverrideCursor()
+        self.remember_dir(paths[0])
         self.set_document(doc)
         if doc.warnings:
             self.statusBar().showMessage("Note: " + " ".join(doc.warnings), 12000)
+
+    open_path = open_paths
+
+    def import_dialog(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import as sheets", self.last_dir(), IMPORT_FILTER)
+        if paths:
+            self.remember_dir(paths[0])
+            self.import_paths(paths)
+
+    def import_paths(self, paths):
+        """Add the pages of PDFs / SVGs to this project as independent sheets."""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            added, warnings = import_into(self.doc, paths)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Could not import", f"{type(e).__name__}: {e}")
+            return
+        QApplication.restoreOverrideCursor()
+        self.remember_dir(paths[0])
+        if added:
+            self.canvas.fit_view()
+            msg = f"Imported {len(added)} sheet(s)"
+            if warnings:
+                msg += ". Note: " + " ".join(warnings)
+            self.statusBar().showMessage(msg, 10000)
 
     def save(self):
         if not self.doc.path:
@@ -417,50 +505,99 @@ class MainWindow(QMainWindow):
         return self._save_to(self.doc.path)
 
     def save_as(self):
-        start = self.doc.path or (os.path.splitext(self.doc.source)[0] + ".svg" if self.doc.source else "untitled.svg")
-        path, _ = QFileDialog.getSaveFileName(self, "Save as SVG", start, "SVG (*.svg);;Compressed SVG (*.svgz)")
+        sheets = self.doc.sheets()
+        base = safe_filename(sheets[0].name) if len(sheets) == 1 else "project"
+        start = self.doc.path or os.path.join(self.last_dir(), base + PROJECT_EXT)
+        path, _ = QFileDialog.getSaveFileName(self, "Save project", start, "VectorFlow project (*.vflow)")
         if not path:
             return False
-        if not path.lower().endswith((".svg", ".svgz")):
-            path += ".svg"
+        if not path.lower().endswith(PROJECT_EXT):
+            path += PROJECT_EXT
         return self._save_to(path)
 
     def _save_to(self, path):
         try:
-            save_svg(self.doc, path)
+            save_project(self.doc, path)
         except OSError as e:
             QMessageBox.critical(self, "Could not save", str(e))
             return False
+        self.remember_dir(path)
         self.doc.path = path
         self.doc.modified = False
         self._update_title()
         self.statusBar().showMessage(f"Saved {path}", 4000)
         return True
 
-    def export_png_dialog(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export PNG", "export.png", "PNG (*.png)")
-        if not path:
+    # ------------------------------------------------------------ export
+    def export_dialog(self):
+        dlg = ExportDialog(self, self.doc)
+        if dlg.exec() != QDialog.Accepted:
             return
-        scale, ok = QInputDialog.getDouble(self, "Export PNG", "Scale (1 = document size):", 1.0, 0.05, 20.0, 2)
-        if ok:
-            if not path.lower().endswith(".png"):
-                path += ".png"
-            export_png(self.doc, path, scale)
-            self.statusBar().showMessage(f"Exported {path}", 4000)
+        fmt = dlg.format()
+        ext = fmt
+        scale = dlg.scale.value()
+        if dlg.mode() == "selection":
+            nodes = common_ancestors_pruned(self.doc.selection)
+            if not nodes:
+                return
+            sh = self.doc.sheet_of(nodes[0])
+            name = safe_filename(sh.name if sh else "selection")
+            path, _ = QFileDialog.getSaveFileName(self, "Export selection", os.path.join(self.last_dir(), f"{name}.{ext}"),
+                                                  f"{FORMATS[fmt]} (*.{ext})")
+            if not path:
+                return
+            if not path.lower().endswith("." + ext):
+                path += "." + ext
+            self._run_export(lambda: export_selection(self.doc, nodes, path, fmt, scale), [path])
+            return
+        units = dlg.chosen_units()
+        if not units:
+            return
+        if len(units) == 1:
+            name = safe_filename(units[0][0].name)
+            path, _ = QFileDialog.getSaveFileName(self, "Export", os.path.join(self.last_dir(), f"{name}.{ext}"),
+                                                  f"{FORMATS[fmt]} (*.{ext})")
+            if not path:
+                return
+            if not path.lower().endswith("." + ext):
+                path += "." + ext
+            paths = [path]
+        else:
+            folder = QFileDialog.getExistingDirectory(self, "Export to folder", self.last_dir())
+            if not folder:
+                return
+            paths = plan_unit_paths(units, folder, ext)
+            clash = [os.path.basename(p) for p in paths if os.path.exists(p)]
+            if clash:
+                r = QMessageBox.question(self, "Overwrite?", "These files already exist and will be replaced:\n\n"
+                                         + "\n".join(clash[:15]), QMessageBox.Yes | QMessageBox.Cancel)
+                if r != QMessageBox.Yes:
+                    return
+        self._run_export(lambda: export_units(self.doc, units, paths, fmt, scale), paths)
 
-    def export_pdf_dialog(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export PDF", "export.pdf", "PDF (*.pdf)")
-        if path:
-            if not path.lower().endswith(".pdf"):
-                path += ".pdf"
-            export_pdf(self.doc, path)
-            self.statusBar().showMessage(f"Exported {path}", 4000)
+    def _run_export(self, fn, paths):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            fn()
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Export failed", f"{type(e).__name__}: {e}")
+            return
+        QApplication.restoreOverrideCursor()
+        self.remember_dir(paths[0])
+        self.statusBar().showMessage(f"Exported {len(paths)} file(s) to {os.path.dirname(paths[0])}", 8000)
 
-    def doc_props(self):
-        dlg = NewDocDialog(self, self.doc.width, self.doc.height, "Document properties")
+    def sheet_props(self):
+        sh = self.doc.current_sheet()
+        if sh is None:
+            return
+        dlg = NewDocDialog(self, sh.width, sh.height, f"Sheet properties \u2014 {sh.name}")
+        name = QLineEdit(sh.name)
+        dlg.layout().insertRow(0, "Name", name)
         if dlg.exec() == QDialog.Accepted:
-            with self.doc.edit():
-                self.doc.width, self.doc.height = dlg.w.value(), dlg.h.value()
+            with self.doc.edit(structure=True):
+                sh.width, sh.height = dlg.w.value(), dlg.h.value()
+                sh.name = name.text().strip() or sh.name
 
     def closeEvent(self, e):
         if self.maybe_save():
@@ -473,11 +610,10 @@ class MainWindow(QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        for u in e.mimeData().urls():
-            p = u.toLocalFile()
-            if p.lower().endswith((".svg", ".svgz", ".pdf")):
-                self.open_path(p)
-                break
+        paths = [u.toLocalFile() for u in e.mimeData().urls()
+                 if u.toLocalFile().lower().endswith((".svg", ".svgz", ".pdf", PROJECT_EXT))]
+        if paths:
+            self.import_paths(paths)
 
     # ------------------------------------------------------------ edit commands
     def delete(self):
@@ -492,30 +628,56 @@ class MainWindow(QMainWindow):
         d = self.doc
         container = d.active_container()
         nodes = [c for c in container.children if c.visible and not c.locked]
-        if not nodes:
-            nodes = [c for c in d.root.children if c.visible and not c.locked]
         d.set_selection(nodes)
 
+    def combine(self):
+        self.doc.combine(self.doc.selection)
+
+    def break_apart(self):
+        self.doc.break_apart(self.doc.selection)
+
     def copy(self):
-        self.clipboard = [fresh_copy(n) for n in self.doc.selection]
-        if self.clipboard:
-            self.statusBar().showMessage(f"Copied {len(self.clipboard)} item(s)", 2500)
+        nodes = common_ancestors_pruned(self.doc.selection)
+        if not nodes:
+            return
+        r = self.doc.bounds_of(nodes)
+        sh = self.doc.sheet_of(nodes[0])
+        ox, oy = (sh.x, sh.y) if sh is not None else (0.0, 0.0)
+        self.clipboard = {"nodes": [fresh_copy(n) for n in nodes], "rect": QRectF(r),
+                          "rel": (r.x() - ox, r.y() - oy)}
+        self.statusBar().showMessage(f"Copied {len(nodes)} item(s)", 2500)
 
     def cut(self):
         self.copy()
         self.delete()
 
-    def paste(self):
-        if not self.clipboard:
+    def paste(self, in_place=False):
+        """Ctrl+V pastes centred on the mouse; Ctrl+Shift+V keeps the same position relative to the
+        top-left corner of the sheet (pasted into the sheet that is currently selected)."""
+        cb = self.clipboard
+        if not cb:
             return
+        doc = self.doc
+        rect = cb["rect"]
+        if in_place:
+            sheet = doc.current_sheet()
+            tl = (sheet.x + cb["rel"][0], sheet.y + cb["rel"][1])
+            dx, dy = tl[0] - rect.x(), tl[1] - rect.y()
+        else:
+            pos = self.canvas.last_mouse
+            if pos is None:
+                pos = self.canvas.to_doc((self.canvas.width() / 2, self.canvas.height() / 2))
+            sheet = doc.sheet_at(pos) or doc.current_sheet()
+            dx, dy = pos[0] - rect.center().x(), pos[1] - rect.center().y()
         out = []
-        with self.doc.edit(structure=True):
-            target = self.doc.active_container()
-            for n in self.clipboard:
+        with doc.edit(structure=True):
+            container = doc.layer_for_sheet(sheet)
+            for n in cb["nodes"]:
                 c = fresh_copy(n)
-                target.add(c)
+                c.transform(affine.translate(dx, dy))
+                container.add(c)
                 out.append(c)
-        self.doc.set_selection(out)
+        doc.set_selection(out)
 
     def duplicate(self):
         if self.doc.selection:

@@ -42,11 +42,35 @@ cd SVG-app
 La primera vez crea un entorno virtual con las dependencias (`PySide6`, `PyMuPDF`, `shapely`); después abre directamente.
 Si prefieres paquetes del sistema en lugar de pip: `sudo pacman -S pyside6 python-shapely python-pymupdf` y luego `python -m vectorflow`.
 
-Abrir un archivo directamente: `./run.sh dibujo.svg` o `vectorflow dibujo.pdf`. También puedes arrastrar un archivo a la ventana.
+Abrir archivos directamente: `./run.sh plano.pdf detalle.pdf` o `vectorflow proyecto.vflow`. También puedes arrastrar PDFs/SVGs a la ventana (se añaden como hojas).
 
 ---
 
 ## Guía rápida
+
+### Proyecto, hojas y guardado
+
+- **Un proyecto = un lienzo con varias hojas** (páginas) colocadas una al lado de otra. Cada hoja tiene su nombre arriba a la izquierda (la etiqueta se puede **arrastrar para mover la hoja entera** con todo lo que lleva).
+- **Importar** (`Ctrl+I`, o arrastrar archivos a la ventana): cada PDF/SVG pasa a ser una hoja con **el nombre del archivo**. Si un PDF tiene varias páginas salen como `nombre - 1`, `nombre - 2`… Cada página conserva su tamaño original.
+- **Abrir** (`Ctrl+O`) acepta varios archivos a la vez y crea un proyecto nuevo con todas sus hojas.
+- El panel de la derecha tiene arriba la lista de **hojas** y debajo las **capas de la hoja seleccionada**: al cambiar de hoja (clic en la lista, en un hueco vacío de la hoja, o seleccionando un objeto) el panel de capas muestra solo lo que hay en ella.
+- **Mover entre hojas**: arrastra un vector y suéltalo sobre otra hoja; pasa a pertenecer a esa hoja (va a su capa activa).
+- **Posición y tamaño** (barra de arriba): X e Y son la distancia desde la **esquina superior izquierda de la hoja** (0, 0) hasta la esquina superior izquierda de la caja del vector. Poner 0, 0 lo deja pegado a esa esquina. W/H cambian el tamaño desde esa esquina (candado = proporcional).
+- **Copiar / pegar**: `Ctrl+V` pega **centrado en el ratón**; `Ctrl+Shift+V` pega **en la misma posición relativa a la hoja** (selecciona primero la hoja de destino): lo que copiaste en la posición (120, 40) de una hoja queda en (120, 40) de la otra.
+- **Guardar** (`Ctrl+S`) crea un archivo **`.vflow`** con todas las hojas (dentro hay un SVG por hoja + un manifiesto, así que cada hoja sigue siendo un SVG normal).
+- **Última carpeta**: la primera vez, los diálogos abren en **Documentos**. Después recuerdan la **última carpeta que usaste** (abrir, importar, guardar o exportar), también si cierras y vuelves a abrir el programa.
+
+### Exportar (`Ctrl+Shift+E`)
+
+1. Elige **Pages** (páginas) o **Selection only** (solo lo seleccionado, recortado a su caja) y el formato: **PDF vectorial, SVG o PNG**.
+2. En *Pages* verás **cada hoja con su vista previa**. Selecciona las que quieras (`Ctrl`/`Shift`+clic).
+3. Cada hoja se guarda **con el nombre del archivo que importaste** (`plano.pdf` → `plano.pdf`). Si exportas una sola eliges dónde; si exportas varias eliges una carpeta y salen una por una, cada una con su nombre (si hay nombres repetidos se añade ` (2)`; si ya existen te pregunta antes de reemplazar).
+4. Para **unir varias hojas en un solo PDF**: arrastra una miniatura **sobre otra** y se juntan (el PDF resultante tiene esas páginas, cada una con su tamaño y se llama como la primera). "Separate selected" las separa. La unión solo existe para PDF.
+
+### Trazos: combinar y separar
+
+- `Ctrl+K` **combina** varios trazos en un solo trazo compuesto (como una letra con agujeros: cada forma queda como subtrazo y los huecos funcionan).
+- `Ctrl+Shift+K` **separa** un trazo compuesto en un trazo por cada subtrazo.
 
 ### Capas (panel de la derecha)
 
@@ -69,7 +93,7 @@ En la barra de opciones de **Mover** puedes elegir si el clic selecciona el *ele
 | Tecla | Herramienta | Notas |
 |---|---|---|
 | `V` | Mover / Seleccionar | Arrastrar = mover. Asas = escalar. **Pasa el ratón justo fuera de una esquina** y el cursor cambia a rotar. |
-| `A` | Selección directa | Puntos, tiradores y segmentos. Doble clic en un punto = suave/esquina; doble clic en un segmento = añadir punto; `Supr` borra puntos. |
+| `A` | Selección directa | Puntos, tiradores y segmentos. Doble clic en un punto = suave/esquina; doble clic en un segmento = añadir punto; `Supr` borra puntos. **Rueda sobre un punto**: ver abajo. |
 | `P` | Pluma | Clic = esquina, clic-arrastrar = curva, clic en el primer punto = cerrar, `Enter`/`Esc` = terminar. Clic en el extremo de un trazo seleccionado lo continúa. |
 | `B` | Lápiz | Trazo libre suavizado a Bézier. |
 | `U` `E` `L` | Rectángulo / Elipse / Línea | Radio de esquina en la barra de opciones. |
@@ -77,6 +101,8 @@ En la barra de opciones de **Mover** puedes elegir si el clic selecciona el *ele
 | `G` | Cubo de pintura | Ver abajo. |
 | `I` | Medir | Ver abajo. |
 | `H` `Z` | Mano / Zoom | `Espacio` = mano temporal. |
+
+**Seleccionar puntos con la rueda** (herramienta `A`): pon el ratón sobre un punto y haz scroll hacia arriba: se van seleccionando, **hacia ambos lados del trazo**, los puntos conectados al punto desde el que empezaste (hacia abajo se va reduciendo). En la barra de opciones puedes cambiar el modo a *Nearby points (area)*, que selecciona los puntos cercanos como hace Inkscape.
 
 **Modificadores**: `Shift` restringe a 0/45/90° al dibujar o mover, escala proporcional, y rota en pasos de 15° · `Alt` dibuja/escala desde el centro y arrastrando **copia** · flechas = empujar 1 px (`Shift` = 10 px).
 **Vista**: rueda = desplazar · `Shift`+rueda = lateral · `Ctrl`/`Alt`+rueda = zoom · `Ctrl+0` ajustar página · `Ctrl+1` 100 %.
@@ -110,9 +136,8 @@ Para modificarla: selecciónala con **Mover** y en la barra de arriba cambia col
 
 ## Formatos
 
-- **Abre**: `.svg`, `.svgz`, `.pdf` (una página a elegir; el PDF se convierte a vectores, el texto pasa a contornos).
-- **Guarda**: `.svg` / `.svgz` (capas = grupos de Inkscape, con nombres, visibilidad y bloqueo). Las mediciones y flechas se guardan con atributos propios para recuperarlas editables y además se dibujan con elementos SVG estándar.
-- **Exporta**: PNG (con escala) y PDF vectorial.
+- **Abre / importa**: `.vflow`, `.svg`, `.svgz`, `.pdf` (cada página, una hoja; el PDF se convierte a vectores y el texto pasa a contornos).
+- **Guarda**: proyecto `.vflow`. Exporta **PDF vectorial** (uno o varios documentos, con páginas unidas si quieres), **SVG** por hoja (capas = grupos de Inkscape, con nombres, visibilidad y bloqueo) y **PNG**. Las mediciones y flechas se guardan con atributos propios para recuperarlas editables y además se dibujan con elementos SVG estándar.
 
 ### Limitaciones conocidas
 
@@ -121,6 +146,7 @@ Dicho con claridad para que no haya sorpresas:
 - Los **degradados** se convierten a un color plano; **patrones, filtros y máscaras** se ignoran (los `clipPath` sí se respetan). Solo se cargan imágenes incrustadas.
 - El texto de un PDF se importa como contornos (no es editable como texto).
 - El relleno del cubo es un polígono (curvas aplanadas con tolerancia muy fina), no reutiliza las curvas originales; en un hueco cerrado por tolerancia puede asomar una pequeña "mejilla" de hasta la mitad de ese valor.
+- Un trazo combinado (`Ctrl+K`) usa siempre relleno par-impar, para que los agujeros funcionen.
 - El snapping de medición es a la línea central del trazo, no al borde exterior del grosor.
 - No hay (todavía) reglas, guías, cuadrícula, operaciones booleanas, degradados ni texto sobre trazado.
 - La caja de selección siempre está alineada a los ejes (tras rotar varios objetos la caja vuelve a ser horizontal).
@@ -132,7 +158,7 @@ Dicho con claridad para que no haya sorpresas:
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
-QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q      # 22 tests: importación, guardado, capas, herramientas, cubo, medición...
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q      # importación, hojas, guardado, exportación, capas, herramientas, cubo, medición...
 ```
 
 Estructura: `vectorflow/model.py` (documento y undo), `svg_io.py` (SVG/PDF), `render.py`, `canvas.py` (vista, snap), `tools_*.py` (herramientas), `layers_panel.py`, `props.py` (barra de estilo), `fill.py` (cubo).
