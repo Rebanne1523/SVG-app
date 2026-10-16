@@ -654,15 +654,18 @@ class MeasureNode(Node):
                 segs.append((p2, tip))
                 arrows.append((tip, (-nx * sgn, -ny * sgn)))
         theta = math.degrees(math.atan2(uy, ux))
-        if abs(abs(theta) - 90.0) < 0.01:
-            theta = -90.0         # vertical text always reads bottom-to-top
-        elif theta > 90.0:
+        if theta > 90.0:                  # baseline always runs left -> right (or bottom -> top)
             theta -= 180
-        elif theta < -90.0:
+        elif theta <= -90.0:
             theta += 180
+        if abs(abs(theta) - 90.0) < 0.01:
+            theta = -90.0 if straight else 90.0
         tr = math.radians(theta)
         up = (math.sin(tr), -math.cos(tr))
-        outer = up if straight else (nx * sgn, ny * sgn)
+        outer = up if straight else (nx * sgn, ny * sgn)     # text sits beyond the dimension line
+        if not straight and abs(theta) >= 45.0 - 1e-6 and up[0] * outer[0] + up[1] * outer[1] < 0:
+            theta += 180                  # steep lines: the top of the text faces away from the line
+            tr = math.radians(theta)
         gap = self.font_size * 0.7 + self.style.width * 0.5
         mid = ((a2[0] + b2[0]) / 2 + outer[0] * gap, (a2[1] + b2[1]) / 2 + outer[1] * gap)
         return {"segs": segs, "arrows": arrows, "text_pos": mid, "text_angle": theta}

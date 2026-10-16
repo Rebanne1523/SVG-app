@@ -377,10 +377,39 @@ def test_enter_compound_and_palette(win):
     assert sel.style.fill == (1, 2, 3, 255) and others[0].style.fill == (0, 0, 255, 255)
 
 
-def test_vertical_measure_text_reads_bottom_to_top():
+def test_measure_text_rule():
+    """Text sits beyond the dimension line. Flat lines read left->right; steep lines turn the top of the
+    text away from the line (left of it: bottom-to-top, right of it: top-to-bottom)."""
     from vectorflow.model import MeasureNode
-    for a, b in (((0, 0), (0, 100)), ((0, 100), (0, 0)), ((0, 0), (0.0001, 100)), ((0, 100), (0.0001, 0))):
-        m = MeasureNode(a, b, 30, "40")
-        assert abs(m.geometry()["text_angle"] + 90) < 0.1
-    assert abs(MeasureNode((0, 0), (100, 0), 30, "x").geometry()["text_angle"]) < 1e-6
-    assert abs(MeasureNode((100, 0), (0, 0), 30, "x").geometry()["text_angle"]) < 1e-6
+    ang = lambda a, b, off: MeasureNode(a, b, off, "40").geometry()["text_angle"] % 360
+    # vertical, dimension line to the LEFT of the measured points -> bottom-to-top
+    assert abs(ang((0, 0), (0, 100), 30) - 270) < 0.1
+    assert abs(ang((0, 100), (0, 0), -30) - 270) < 0.1
+    # vertical, dimension line to the RIGHT -> top-to-bottom
+    assert abs(ang((0, 0), (0, 100), -30) - 90) < 0.1
+    assert abs(ang((0, 100), (0, 0), 30) - 90) < 0.1
+    # horizontal: always upright, whichever side
+    for a, b in (((0, 0), (100, 0)), ((100, 0), (0, 0))):
+        for off in (30, -30):
+            assert abs(ang(a, b, off)) < 0.1
+    # shallow diagonal: reads along the line, not upside down
+    t = ang((0, 0), (100, -50), 30)
+    assert t > 300 or t < 60
+    # straight vertical line keeps reading bottom-to-top
+    assert abs(ang((0, 0), (0, 100), 0) - 270) < 0.1
+
+
+def test_export_tiles_toggle_selection(win):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    win.doc.new_sheet("B")
+    win.doc.new_sheet("C")
+    dlg = ExportDialog(win, win.doc, "/tmp")
+    dlg.resize(700, 640)
+    dlg.show()
+    L = dlg.list
+    for i in range(L.count()):
+        L.item(i).setSelected(False)
+    for k in (0, 1):
+        QTest.mouseClick(L.viewport(), Qt.LeftButton, Qt.NoModifier, L.visualItemRect(L.item(k)).center())
+    assert [L.item(i).isSelected() for i in range(3)] == [True, True, False]
