@@ -375,3 +375,12 @@ def test_enter_compound_and_palette(win):
     sel = win.doc.selection[0]
     others = [n for n in paths if n is not sel]
     assert sel.style.fill == (1, 2, 3, 255) and others[0].style.fill == (0, 0, 255, 255)
+
+
+def test_vertical_measure_text_reads_bottom_to_top():
+    from vectorflow.model import MeasureNode
+    for a, b in (((0, 0), (0, 100)), ((0, 100), (0, 0)), ((0, 0), (0.0001, 100)), ((0, 100), (0.0001, 0))):
+        m = MeasureNode(a, b, 30, "40")
+        assert abs(m.geometry()["text_angle"] + 90) < 0.1
+    assert abs(MeasureNode((0, 0), (100, 0), 30, "x").geometry()["text_angle"]) < 1e-6
+    assert abs(MeasureNode((100, 0), (0, 0), 30, "x").geometry()["text_angle"]) < 1e-6

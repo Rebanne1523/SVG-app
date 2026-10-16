@@ -654,9 +654,11 @@ class MeasureNode(Node):
                 segs.append((p2, tip))
                 arrows.append((tip, (-nx * sgn, -ny * sgn)))
         theta = math.degrees(math.atan2(uy, ux))
-        if theta > 89.999:
-            theta -= 180          # vertical text reads bottom-to-top
-        elif theta <= -90:
+        if abs(abs(theta) - 90.0) < 0.01:
+            theta = -90.0         # vertical text always reads bottom-to-top
+        elif theta > 90.0:
+            theta -= 180
+        elif theta < -90.0:
             theta += 180
         tr = math.radians(theta)
         up = (math.sin(tr), -math.cos(tr))
