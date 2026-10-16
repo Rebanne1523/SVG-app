@@ -65,6 +65,22 @@ class LayerTree(QTreeWidget):
             else:
                 self.panel.toggle_lock(item.node)
             return
+        if (item is not None and col == COL_NAME and e.button() == Qt.LeftButton and not e.modifiers()
+                and isinstance(item, NodeItem) and item.node.is_group() and item.isSelected()
+                and len(self.selectedItems()) == 1):
+            # a second click on an already selected folder selects every vector inside it
+            leaves = []
+
+            def walk(n):
+                for c in n.children:
+                    if c.is_group():
+                        walk(c)
+                    elif not c.locked:
+                        leaves.append(c)
+            walk(item.node)
+            if leaves:
+                self.panel.get_doc().set_selection(leaves)
+                return
         super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e):

@@ -71,6 +71,7 @@ Abrir archivos directamente: `./run.sh plano.pdf detalle.pdf` o `vectorflow proy
 
 ### Trazos: combinar y separar
 
+- En Capas, un segundo clic sobre una carpeta ya seleccionada selecciona todos los vectores de dentro.
 - `Ctrl+J` **combina** varios trazos en un solo trazo compuesto (como una letra con agujeros: cada forma queda como subtrazo y los huecos funcionan).
 - `Ctrl+Shift+J` **separa** un trazo compuesto en un trazo por cada subtrazo.
 

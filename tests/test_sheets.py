@@ -477,3 +477,30 @@ def test_export_custom_names(tmp_path):
     a.name, b.name = "one", "two"
     p = plan_unit_paths([[a], [b]], str(tmp_path), "pdf", ["renamed.pdf", ""])
     assert [x.name for x in map(__import__("pathlib").Path, p)] == ["renamed.pdf", "two.pdf"]
+
+
+def test_second_click_on_folder_selects_its_vectors(qapp):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from vectorflow.model import Document, PathNode, Group
+    from vectorflow.layers_panel import LayersPanel
+    d = Document()
+    lay = d.current_layer() if hasattr(d, "current_layer") else d.sheets()[0].children[0]
+    g = Group("F")
+    a = PathNode.rect(0, 0, 10, 10)
+    b = PathNode.rect(20, 0, 10, 10)
+    lay.add(g)
+    g.add(a)
+    g.add(b)
+    d.structure_changed.emit() if hasattr(d, "structure_changed") else None
+    panel = LayersPanel(lambda: d)
+    panel.resize(300, 400)
+    panel.show()
+    panel.rebuild() if hasattr(panel, "rebuild") else None
+    it = panel.item_of[id(g)]
+    pos = panel.tree.visualItemRect(it).center()
+    pos = QPoint(60, pos.y())
+    QTest.mouseClick(panel.tree.viewport(), Qt.LeftButton, Qt.NoModifier, pos)
+    assert d.selection == [g]
+    QTest.mouseClick(panel.tree.viewport(), Qt.LeftButton, Qt.NoModifier, pos)
+    assert set(map(id, d.selection)) == {id(a), id(b)}
