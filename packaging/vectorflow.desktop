@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VectorFlow
+GenericName=Vector editor
+Comment=Vector editor with easy layers, smart bucket and measurement lines
+Exec=vectorflow %F
+Icon=vectorflow
+Terminal=false
+Categories=Graphics;VectorGraphics;2DGraphics;
+MimeType=image/svg+xml;image/svg+xml-compressed;
+StartupWMClass=vectorflow
