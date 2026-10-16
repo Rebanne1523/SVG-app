@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 
 from .geometry import bez_tangent, dist, flatten_cubic
 from .model import arrow_length, arrow_path, qcolor
@@ -206,11 +206,11 @@ def render_sheet(painter: QPainter, sheet):
     painter.setOpacity(1.0)
 
 
-def sheet_image(sheet, scale=1.0, transparent=False):
+def sheet_image(sheet, scale=1.0, transparent=False, bg=None):
     from PySide6.QtGui import QImage
     w, h = max(1, int(round(sheet.width * scale))), max(1, int(round(sheet.height * scale)))
     img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
-    img.fill(Qt.transparent if transparent else Qt.white)
+    img.fill(QColor(*bg) if bg else (Qt.transparent if transparent else Qt.white))
     p = QPainter(img)
     p.scale(scale, scale)
     render_sheet(p, sheet)
@@ -223,11 +223,11 @@ def sheet_thumbnail(sheet, max_w=220, max_h=160):
     return sheet_image(sheet, s)
 
 
-def export_sheet_png(sheet, path, scale=1.0, transparent=True):
-    return sheet_image(sheet, scale, transparent).save(path)
+def export_sheet_png(sheet, path, scale=1.0, transparent=True, bg=None):
+    return sheet_image(sheet, scale, transparent, bg).save(path)
 
 
-def export_sheets_pdf(sheets, path):
+def export_sheets_pdf(sheets, path, bg=None):
     """Vector PDF with one page per sheet; each page keeps its own size (1 unit = pt_per_unit points)."""
     from PySide6.QtCore import QMarginsF, QSizeF
     from PySide6.QtGui import QPageSize, QPdfWriter
@@ -243,6 +243,8 @@ def export_sheets_pdf(sheets, path):
             w.newPage()
         painter.save()
         painter.scale(sh.pt_per_unit, sh.pt_per_unit)
+        if bg:
+            painter.fillRect(QRectF(0, 0, sh.width, sh.height), QColor(*bg))
         render_sheet(painter, sh)
         painter.restore()
     if painter is not None:

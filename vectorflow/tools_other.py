@@ -1,14 +1,17 @@
 """Hand (H), Zoom (Z), Paint bucket (G) and Measure (I) tools."""
 from __future__ import annotations
 
+import math
+
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap, QPainterPath
-from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QHBoxLayout, QInputDialog, QLabel, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QInputDialog, QLabel, QWidget)
 
+from .numfield import NumField
 from .fill import fill_at
 from .geometry import constrain_angle_projected, dist
-from .model import MeasureNode, Style
+from .model import MeasureNode, Style, walk
 from .render import draw_node
 from .tools_base import Tool
 
@@ -133,7 +136,7 @@ class BucketTool(Tool):
         lay = QHBoxLayout(w)
         lay.setContentsMargins(4, 0, 4, 0)
         lay.addWidget(QLabel("Close gaps up to:"))
-        sp = QDoubleSpinBox()
+        sp = NumField()
         sp.setRange(0, 200)
         sp.setSingleStep(0.5)
         sp.setSuffix(" px")
@@ -203,7 +206,10 @@ class MeasureTool(Tool):
         self.offset = 0.0
         self.mode_a = "leg"
         self.mode_b = "leg"
-        self.edges = True
+        self.edges = getattr(self, "edges", True)
+        self.drag_a = None      # press-and-drag at A / B: where the arrow starts (document point)
+        self.drag_b = None
+        self._down = None       # ("a" | "b", press point) while the button is held
 
     def cursor(self):
         return QCursor(Qt.CrossCursor)
@@ -238,6 +244,7 @@ class MeasureTool(Tool):
             self.a = self._snap(ev)
             self.cur = self.a
             self.stage = 1
+            self._down = ("a", self.a)
             self.say("Move to the second point and click. Scroll to flip the first arrow.")
         elif self.stage == 1:
             b = self._snap(ev, self.a)
@@ -245,12 +252,17 @@ class MeasureTool(Tool):
                 return
             self.b = b
             self.stage = 2
+            self._down = ("b", b)
             self.offset = 0.0
             self.say("Move to choose the side and height, then click. Scroll to flip the second arrow.")
         elif self.stage == 2:
             self._finish()
 
     def move(self, ev):
+        if self._down is not None:
+            self.cur = self._snap(ev)
+            self.say("Release where the arrow should start")
+            return
         if self.stage == 0:
             self.cur = self._snap(ev)
         elif self.stage == 1:
@@ -258,6 +270,43 @@ class MeasureTool(Tool):
             self.say(f"Length {dist(self.a, self.cur):.2f}")
         elif self.stage == 2:
             self._update_offset(ev)
+
+    def release(self, ev):
+        if self._down is None:
+            return
+        which, origin = self._down
+        self._down = None
+        pt = self._snap(ev)
+        if dist(pt, origin) * self.canvas.zoom < 5:
+            self.cur = origin if which == "a" else self.cur
+            return
+        vec = (pt[0] - origin[0], pt[1] - origin[1])
+        if which == "a":
+            self.drag_a = vec
+            self.cur = origin
+        else:
+            self.drag_b = vec
+        self.say("Arrow start set. " + ("Move to the second point and click." if which == "a"
+                                         else "Move to choose the side and height, then click."))
+
+    def _gap(self, vec):
+        if vec is None:
+            return None
+        ax, ay = self.a
+        bx, by = self.b
+        l = dist(self.a, self.b)
+        if l < 1e-9:
+            return None
+        nx, ny = -(by - ay) / l, (bx - ax) / l
+        proj = abs(vec[0] * nx + vec[1] * ny)
+        full = math.hypot(*vec)
+        return proj if proj >= 0.3 * full else full
+
+    def _template(self):
+        for n in walk(self.doc.root):
+            if n.kind == "measure" and n.linked:
+                return n
+        return None
 
     def _update_offset(self, ev):
         ax, ay = self.a
@@ -317,9 +366,23 @@ class MeasureTool(Tool):
         width = max(0.2, float(f"{1.3 / z:.2g}"))
         st = Style(fill=None, stroke=(0, 0, 0, 255), width=width)
         td = self.canvas.text_defaults
-        return MeasureNode(self.a, self.b, self.offset, text, self.mode_a, self.mode_b, st,
+        node = MeasureNode(self.a, self.b, self.offset, text, self.mode_a, self.mode_b, st,
                            family=td["family"], font_size=size, text_color=(0, 0, 0, 255),
                            bold=td["bold"], italic=td["italic"], name="Measure")
+        # new lines look like the existing ones: the project-wide settings carry over
+        t = self._template()
+        gap_a = gap_b = 0.0
+        if t is not None:
+            node.style = t.style.copy()
+            node.family, node.font_size = t.family, t.font_size
+            node.bold, node.italic, node.text_color = t.bold, t.italic, t.text_color
+            node.arrow_kind = t.arrow_kind
+            gap_a, gap_b = t.gap_a, t.gap_b
+        ga, gb = self._gap(self.drag_a), self._gap(self.drag_b)
+        node.gap_a = gap_a if ga is None else ga
+        node.gap_b = gap_b if gb is None else gb
+        node.linked = ga is None and gb is None
+        return node
 
     def _finish(self):
         length = dist(self.a, self.b)
@@ -344,7 +407,9 @@ class MeasureTool(Tool):
         if self.stage == 0:
             return
         p.setBrush(Qt.NoBrush)
-        if self.stage == 1 and self.cur is not None:
+        if self._down is not None:
+            pass
+        elif self.stage == 1 and self.cur is not None:
             va, vb = c.to_view(self.a), c.to_view(self.cur)
             pen = QPen(ACCENT)
             pen.setStyle(Qt.DashLine)
@@ -363,6 +428,10 @@ class MeasureTool(Tool):
             self._draw_preview(p)
             self._dot(p, c.to_view(self.a))
             self._dot(p, c.to_view(self.b))
+        if self._down is not None and self.cur is not None:
+            pen = QPen(ACCENT, 1.0, Qt.DashLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(*c.to_view(self._down[1])), QPointF(*c.to_view(self.cur)))
 
     def _dot(self, p, v):
         p.setPen(QPen(PINK, 1.5))

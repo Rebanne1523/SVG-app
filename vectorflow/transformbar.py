@@ -1,8 +1,9 @@
 """X / Y / W / H of the selection, measured from the top-left corner of its sheet (0, 0)."""
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QToolBar, QToolButton
+from PySide6.QtWidgets import QLabel, QToolBar, QToolButton
 
+from .numfield import NumField
 from . import affine
 from .model import common_ancestors_pruned
 
@@ -33,7 +34,7 @@ class TransformBar:
 
     def _add(self, key, label):
         self.bar.addWidget(QLabel(f" {label} "))
-        sp = QDoubleSpinBox()
+        sp = NumField()
         sp.setRange(-1e7, 1e7)
         sp.setDecimals(2)
         sp.setSingleStep(1.0)

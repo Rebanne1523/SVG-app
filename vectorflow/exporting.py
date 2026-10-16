@@ -30,27 +30,27 @@ def plan_unit_paths(units, folder, ext):
     return paths
 
 
-def export_unit(doc, sheets, path, fmt, scale=1.0):
+def export_unit(doc, sheets, path, fmt, scale=1.0, bg=None):
     if fmt == "pdf":
-        export_sheets_pdf(sheets, path)
+        export_sheets_pdf(sheets, path, bg)
     elif fmt == "svg":
         save_svg(doc, path, sheets[0])
     elif fmt == "png":
-        export_sheet_png(sheets[0], path, scale, transparent=False)
+        export_sheet_png(sheets[0], path, scale, transparent=True, bg=bg)
     else:
         raise ValueError(fmt)
 
 
-def export_units(doc, units, paths, fmt, scale=1.0):
+def export_units(doc, units, paths, fmt, scale=1.0, bg=None):
     """units[i] is exported to paths[i]. SVG/PNG hold a single sheet, so merged units are only
     meaningful for PDF (the dialog enforces that)."""
     for unit, path in zip(units, paths):
-        export_unit(doc, unit, path, fmt, scale)
+        export_unit(doc, unit, path, fmt, scale, bg)
     return paths
 
 
-def export_selection(doc, nodes, path, fmt, scale=1.0):
+def export_selection(doc, nodes, path, fmt, scale=1.0, bg=None):
     """Export only ``nodes`` (cropped to their bounding box)."""
     tmp = selection_document(nodes)
-    export_unit(tmp, tmp.sheets(), path, fmt, scale)
+    export_unit(tmp, tmp.sheets(), path, fmt, scale, bg)
     return path

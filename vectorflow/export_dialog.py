@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem, QPushButton,
-                               QRadioButton, QVBoxLayout)
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
+                               QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+                               QListWidgetItem, QPushButton, QToolButton, QVBoxLayout)
 
+from .numfield import NumField
 from .render import sheet_thumbnail
 
 TILE = QSize(210, 175)
@@ -46,7 +47,7 @@ class UnitList(QListWidget):
         self.setGridSize(TILE)
         self.setResizeMode(QListView.Adjust)
         self.setMovement(QListView.Snap)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setSelectionMode(QAbstractItemView.MultiSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
@@ -64,38 +65,33 @@ class UnitList(QListWidget):
 
 
 class ExportDialog(QDialog):
-    def __init__(self, parent, doc):
+    """Document / Page / Selection, page tiles with previews, folder + format, one big Export button."""
+
+    def __init__(self, parent, doc, folder=""):
         super().__init__(parent)
         self.setWindowTitle("Export")
-        self.resize(820, 600)
+        self.resize(640, 640)
         self.doc = doc
+        self.bg = None                                      # None = transparent
         self.units = [[s] for s in doc.sheets()]          # list of lists of Sheet
         lay = QVBoxLayout(self)
 
-        top = QHBoxLayout()
-        self.r_pages = QRadioButton("Pages")
-        self.r_sel = QRadioButton("Selection only")
-        self.r_pages.setChecked(True)
-        self.r_sel.setEnabled(bool(doc.selection))
+        modes = QHBoxLayout()
+        self.mode_group = QButtonGroup(self)
+        self.mode_btns = {}
+        for key, label in (("document", "Document"), ("pages", "Page"), ("selection", "Selection")):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setMinimumHeight(34)
+            self.mode_group.addButton(b)
+            self.mode_btns[key] = b
+            modes.addWidget(b, 1)
+        self.mode_btns["pages"].setChecked(True)
+        self.mode_btns["selection"].setEnabled(bool(doc.selection))
         if not doc.selection:
-            self.r_sel.setToolTip("Select something on the canvas first")
-        top.addWidget(QLabel("Export:"))
-        top.addWidget(self.r_pages)
-        top.addWidget(self.r_sel)
-        top.addStretch(1)
-        top.addWidget(QLabel("Format:"))
-        self.fmt = QComboBox()
-        for key, label in (("pdf", "PDF (vector)"), ("svg", "SVG"), ("png", "PNG")):
-            self.fmt.addItem(label, key)
-        top.addWidget(self.fmt)
-        self.scale_lbl = QLabel("Scale:")
-        self.scale = QDoubleSpinBox()
-        self.scale.setRange(0.1, 20)
-        self.scale.setValue(1.0)
-        self.scale.setDecimals(2)
-        top.addWidget(self.scale_lbl)
-        top.addWidget(self.scale)
-        lay.addLayout(top)
+            self.mode_btns["selection"].setToolTip("Select something on the canvas first")
+        self.mode_btns["document"].setToolTip("Every sheet in one multi-page PDF")
+        lay.addLayout(modes)
 
         self.hint = QLabel()
         self.hint.setWordWrap(True)
@@ -106,25 +102,63 @@ class ExportDialog(QDialog):
         lay.addWidget(self.list, 1)
 
         row = QHBoxLayout()
+        self.all_btn = QPushButton("Select all")
+        self.all_btn.clicked.connect(self.list.selectAll)
         self.sep_btn = QPushButton("Separate selected")
         self.sep_btn.setToolTip("Undo the merge of the selected tile(s)")
         self.sep_btn.clicked.connect(self.separate)
-        self.all_btn = QPushButton("Select all")
-        self.all_btn.clicked.connect(self.list.selectAll)
         row.addWidget(self.all_btn)
         row.addWidget(self.sep_btn)
         row.addStretch(1)
+        self.only_sel = QCheckBox("Export only selection")
+        self.only_sel.setEnabled(bool(doc.selection))
+        row.addWidget(self.only_sel)
         lay.addLayout(row)
 
-        bb = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.ok_btn = bb.addButton("Export…", QDialogButtonBox.AcceptRole)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.bg_btn = QToolButton()
+        self.bg_btn.setFixedSize(52, 28)
+        self.bg_btn.setToolTip("Background colour (PNG and PDF). Transparent by default.")
+        self.bg_btn.clicked.connect(self._pick_bg)
+        row.addWidget(self.bg_btn)
+        row.addWidget(QLabel("Background colour"))
+        lay.addLayout(row)
+        self._paint_bg()
+
+        row = QHBoxLayout()
+        self.folder_edit = QLineEdit(folder)
+        self.folder_edit.setPlaceholderText("Folder to save into")
+        row.addWidget(self.folder_edit, 1)
+        fb = QToolButton()
+        fb.setText("📁")
+        fb.setToolTip("Choose folder")
+        fb.clicked.connect(self._choose_folder)
+        row.addWidget(fb)
+        self.fmt = QComboBox()
+        for key, label in (("pdf", "PDF (*.pdf)"), ("svg", "SVG (*.svg)"), ("png", "PNG (*.png)")):
+            self.fmt.addItem(label, key)
+        row.addWidget(self.fmt)
+        self.scale_lbl = QLabel("Scale")
+        self.scale = NumField()
+        self.scale.setRange(0.1, 20)
+        self.scale.setValue(1.0)
+        self.scale.setDecimals(2)
+        row.addWidget(self.scale_lbl)
+        row.addWidget(self.scale)
+        lay.addLayout(row)
+
+        self.ok_btn = QPushButton("Export")
+        self.ok_btn.setMinimumHeight(36)
+        self.ok_btn.setDefault(True)
+        self.ok_btn.clicked.connect(self.accept)
+        lay.addWidget(self.ok_btn)
 
         self.fmt.currentIndexChanged.connect(self._format_changed)
-        self.r_pages.toggled.connect(self._mode_changed)
-        self.list.itemSelectionChanged.connect(self._update_ok)
+        self.mode_group.buttonToggled.connect(self._mode_changed)
+        self.only_sel.toggled.connect(self._only_sel_toggled)
+        self.list.itemSelectionChanged.connect(self._sync_checks)
+        self.folder_edit.textChanged.connect(self._update_ok)
         self.rebuild(select_current=True)
         self._format_changed()
 
@@ -133,10 +167,47 @@ class ExportDialog(QDialog):
         return self.fmt.currentData()
 
     def mode(self):
-        return "pages" if self.r_pages.isChecked() else "selection"
+        for k, b in self.mode_btns.items():
+            if b.isChecked():
+                return k
+        return "pages"
+
+    def folder(self):
+        return self.folder_edit.text().strip()
 
     def merge_allowed(self):
         return self.mode() == "pages" and self.format() == "pdf"
+
+    def _choose_folder(self):
+        start = self.folder() or ""
+        d = QFileDialog.getExistingDirectory(self, "Export to folder", start)     # the system's own dialog
+        if d:
+            self.folder_edit.setText(d)
+
+    def _paint_bg(self):
+        pm = QPixmap(48, 24)
+        p = QPainter(pm)
+        for i in range(0, 48, 8):
+            for j in range(0, 24, 8):
+                p.fillRect(i, j, 8, 8, QColor(170, 170, 170) if (i // 8 + j // 8) % 2 else QColor(110, 110, 110))
+        if self.bg:
+            p.fillRect(0, 0, 48, 24, QColor(*self.bg))
+        p.end()
+        self.bg_btn.setIcon(QIcon(pm))
+        self.bg_btn.setIconSize(QSize(48, 24))
+
+    def _pick_bg(self):
+        start = QColor(*self.bg) if self.bg else QColor(255, 255, 255, 0)
+        c = QColorDialog.getColor(start, self, "Background colour", QColorDialog.ShowAlphaChannel)
+        if c.isValid():
+            self.bg = None if c.alpha() == 0 else (c.red(), c.green(), c.blue(), c.alpha())
+            self._paint_bg()
+
+    def _only_sel_toggled(self, on):
+        if on and self.mode_btns["selection"].isEnabled():
+            self.mode_btns["selection"].setChecked(True)
+        elif not on and self.mode() == "selection":
+            self.mode_btns["pages"].setChecked(True)
 
     def _format_changed(self):
         png = self.format() == "png"
@@ -146,27 +217,40 @@ class ExportDialog(QDialog):
             self.separate_all()
         self._update_hint()
 
-    def _mode_changed(self):
-        pages = self.mode() == "pages"
-        self.list.setEnabled(pages)
-        self.sep_btn.setEnabled(pages)
-        self.all_btn.setEnabled(pages)
+    def _mode_changed(self, *_):
+        m = self.mode()
+        self.list.setEnabled(m == "pages")
+        self.sep_btn.setEnabled(m == "pages")
+        self.all_btn.setEnabled(m == "pages")
+        self.only_sel.blockSignals(True)
+        self.only_sel.setChecked(m == "selection")
+        self.only_sel.blockSignals(False)
         self._update_hint()
         self._update_ok()
 
     def _update_hint(self):
-        if self.mode() == "selection":
+        m = self.mode()
+        if m == "selection":
             self.hint.setText("Only the selected objects are exported, cropped to their bounding box.")
+        elif m == "document":
+            self.hint.setText("Every sheet goes into one multi-page PDF." if self.format() == "pdf" else
+                              "Each sheet is saved as its own file with its original name.")
         elif self.format() == "pdf":
-            self.hint.setText("Select the pages to export. Each one is saved with the name of the file it was "
-                              "imported from. To export several pages as ONE multi-page PDF, drag a page tile "
-                              "onto another.")
+            self.hint.setText("Pick the pages to export; each is saved with the name of the file it was imported "
+                              "from. To export several pages as ONE multi-page PDF, drag a page tile onto another.")
         else:
-            self.hint.setText("Select the pages to export; each one is saved as its own file with its "
-                              "original name. (Merging pages into one file is only possible for PDF.)")
+            self.hint.setText("Pick the pages to export; each is saved as its own file with its original name. "
+                              "(Merging pages is only possible for PDF.)")
 
-    def _update_ok(self):
-        self.ok_btn.setEnabled(self.mode() == "selection" or bool(self.list.selectedItems()))
+    def _sync_checks(self):
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setCheckState(Qt.Checked if it.isSelected() else Qt.Unchecked)
+        self._update_ok()
+
+    def _update_ok(self, *_):
+        ok = bool(self.folder()) and (self.mode() != "pages" or bool(self.list.selectedItems()))
+        self.ok_btn.setEnabled(ok)
 
     # ------------------------------------------------------------ tiles
     def rebuild(self, select_current=False, keep=None):
@@ -177,10 +261,11 @@ class ExportDialog(QDialog):
             it.setData(Qt.UserRole, id(unit))
             it.setTextAlignment(Qt.AlignHCenter)
             it.setToolTip("\n".join(s.name for s in unit))
+            it.setFlags(it.flags() & ~Qt.ItemIsUserCheckable)
             self.list.addItem(it)
             if (select_current and cur in unit) or (keep is not None and unit is keep):
                 it.setSelected(True)
-        self._update_ok()
+        self._sync_checks()
 
     @staticmethod
     def _label(unit):
@@ -219,5 +304,8 @@ class ExportDialog(QDialog):
 
     # ------------------------------------------------------------ result
     def chosen_units(self):
+        if self.mode() == "document":
+            sheets = [s for u in self.units for s in u]
+            return [sheets] if self.format() == "pdf" else [[s] for s in sheets]
         sel = {id(self._unit_of(i)) for i in self.list.selectedItems()}
         return [u for u in self.units if id(u) in sel]

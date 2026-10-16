@@ -62,15 +62,23 @@ Abrir archivos directamente: `./run.sh plano.pdf detalle.pdf` o `vectorflow proy
 
 ### Exportar (`Ctrl+Shift+E`)
 
-1. Elige **Pages** (páginas) o **Selection only** (solo lo seleccionado, recortado a su caja) y el formato: **PDF vectorial, SVG o PNG**.
-2. En *Pages* verás **cada hoja con su vista previa**. Selecciona las que quieras (`Ctrl`/`Shift`+clic).
-3. Cada hoja se guarda **con el nombre del archivo que importaste** (`plano.pdf` → `plano.pdf`). Si exportas una sola eliges dónde; si exportas varias eliges una carpeta y salen una por una, cada una con su nombre (si hay nombres repetidos se añade ` (2)`; si ya existen te pregunta antes de reemplazar).
-4. Para **unir varias hojas en un solo PDF**: arrastra una miniatura **sobre otra** y se juntan (el PDF resultante tiene esas páginas, cada una con su tamaño y se llama como la primera). "Separate selected" las separa. La unión solo existe para PDF.
+1. Arriba eliges **Document** (todas las hojas, en un solo PDF), **Page** (hojas sueltas con casilla y vista previa) o **Selection** (solo lo seleccionado, recortado a su caja; es lo mismo que la casilla *Export only selection*).
+2. Abajo: color de fondo (transparente por defecto, para PNG y PDF), la **carpeta** (botón 📁 abre el explorador de tu escritorio) y el formato **PDF vectorial, SVG o PNG**. Pulsa **Export**.
+3. Cada hoja se guarda **con el nombre del archivo que importaste** (`plano.pdf` → `plano.pdf`); si hay nombres repetidos se añade ` (2)` y si ya existen te pregunta antes de reemplazar.
+4. Para **unir varias hojas en un solo PDF**: arrastra una miniatura **sobre otra**. El PDF resultante conserva el tamaño de cada página y se llama como la primera. "Separate selected" las separa. La unión solo existe para PDF.
+
+**Explorador de archivos:** abrir, importar, guardar y exportar usan el diálogo de tu escritorio (Dolphin en KDE) a través de `xdg-desktop-portal`. En CachyOS con KDE viene instalado (`xdg-desktop-portal-kde`); si no, `sudo pacman -S xdg-desktop-portal-kde`. Sin portal, la app cae al diálogo propio de Qt.
 
 ### Trazos: combinar y separar
 
 - `Ctrl+K` **combina** varios trazos en un solo trazo compuesto (como una letra con agujeros: cada forma queda como subtrazo y los huecos funcionan).
 - `Ctrl+Shift+K` **separa** un trazo compuesto en un trazo por cada subtrazo.
+
+- **Entrar en un compuesto:** doble clic sobre él (en el lienzo o en el panel de capas). Se abre en una carpeta de trazos independientes, cada uno con su propio relleno y trazo, y el panel de capas muestra una pestaña **Inside: …**. Ojo: al separarse, los huecos dejan de serlo (un anillo pasa a ser dos círculos); `Ctrl+Z` lo deshace.
+
+### Colores rápidos (barra de abajo)
+
+Un clic en la paleta cambia el color de lo seleccionado **sin añadir nada que no tenga**: si solo tiene trazo cambia el trazo, si solo tiene relleno cambia el relleno. Si tiene ambos aparecen **dos barras**, una para relleno y otra para trazo. La `∅` quita el color.
 
 ### Capas (panel de la derecha)
 
@@ -87,6 +95,8 @@ Abrir archivos directamente: `./run.sh plano.pdf detalle.pdf` o `vectorflow proy
 | Opacidad | Control deslizante sobre la lista. |
 
 En la barra de opciones de **Mover** puedes elegir si el clic selecciona el *elemento exacto* o el *elemento de primer nivel de su capa* (la carpeta completa).
+
+**Escalar:** `Shift` mantiene la proporción (sin snapping); `Shift`+`Ctrl` mantiene la proporción **y** el snapping. **Campos numéricos:** un clic selecciona todo; el `.` y la `,` del teclado numérico valen como decimal.
 
 ### Herramientas
 
@@ -129,6 +139,10 @@ Relleno, trazo, **grosor**, **tipo de línea** (sólida, rayas, puntos, punto-ra
 4. **Clic final** → aparece un cuadro para escribir la medida (propone la longitud calculada).
 
 **Rueda del ratón**: justo después del 1.er clic voltea la flecha del primer punto; después del 2.º clic, la del segundo. Entre "flecha en la pata" y "flecha siguiendo la línea larga" (así se hacen **L** o líneas rectas). `Esc` / clic derecho cancela.
+
+**Arrastrar desde el punto:** en el clic A (o B) **mantén pulsado y arrastra** hasta otro punto (con snapping): la flecha empieza ahí, a esa distancia del punto medido. Sirve para medir algo interno desde fuera. Esa línea queda **sin vincular** (*Link height* desmarcado).
+
+**Ajustes globales:** con la casilla **Apply to all measurements** (marcada por defecto) cambiar tamaño/fuente/color del texto, grosor, color, tipo de línea o flecha en una medición lo cambia en todas. **Height** (altura de la U/L) y **Arrow distance** también son globales, salvo en las líneas con *Link height* desmarcado. Desmarca la casilla para editar solo la seleccionada. La flecha es proporcional al grosor de la línea.
 
 Para modificarla: selecciónala con **Mover** y en la barra de arriba cambia color y grosor de línea, tipo de línea, tipo/tamaño de flecha, texto (también doble clic), fuente, tamaño y color del texto, lado ("Flip side") y modo de cada extremo.
 

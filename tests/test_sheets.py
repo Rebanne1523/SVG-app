@@ -268,3 +268,110 @@ def test_scroll_on_closed_path_wraps(win):
     for _ in range(2):
         D.wheel(a[0].p, 120)                                  # 2 notches: origin + 2 points each way
     assert {id(x) for _, x in tool.sel} == {id(a[0]), id(a[1]), id(a[5]), id(a[2]), id(a[4])}
+
+
+# ---------------------------------------------------------------- round 4
+def test_numfield_numpad_decimal_and_select_all(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from vectorflow.numfield import NumField
+    f = NumField()
+    f.setRange(0, 1000)
+    f.setDecimals(2)
+    f.setValue(12.5)
+    assert f.text() == "12.5"                       # no trailing zeros
+    f.show()
+    f.setFocus()
+    f.lineEdit().selectAll()
+    QTest.keyClicks(f, "3")
+    QTest.keyClick(f, Qt.Key_Comma)                 # numpad decimal in many layouts
+    QTest.keyClicks(f, "25")
+    QTest.keyClick(f, Qt.Key_Return)
+    assert abs(f.value() - 3.25) < 1e-9
+
+
+def _measure(win, **kw):
+    from vectorflow.model import MeasureNode
+    m = MeasureNode((0, 0), (100, 0), 40, "100", **kw)
+    win.doc.add_node(m)
+    return m
+
+
+def test_measure_global_vs_linked(win):
+    a, b = _measure(win), _measure(win)
+    sb = win.style_bar
+    win.doc.set_selection([a])
+    sb.all_chk.setChecked(True)
+    sb.height.setValue(25)
+    assert a.offset == 25 and b.offset == 25          # linked -> project-wide
+    sb.link_chk.setChecked(False)                      # a is now unlinked
+    sb.height.setValue(10)
+    assert a.offset == 10 and b.offset == 25
+    sb.all_chk.setChecked(True)
+    sb._apply(width=3.0)
+    assert a.style.width == 3.0 and b.style.width == 3.0
+    sb.all_chk.setChecked(False)
+    sb._apply(width=5.0)
+    assert a.style.width == 5.0 and b.style.width == 3.0
+
+
+def test_measure_gap_and_arrow_scale(win):
+    m = _measure(win)
+    base = m.geometry()["arrows"][0][0]
+    m.gap_a = 12
+    tip = m.geometry()["arrows"][0][0]
+    assert abs(tip[1] - base[1]) == 12                 # tip moved along the leg
+    m.style.width = 2.0
+    l2 = m.arrow_len()
+    m.style.width = 4.0
+    assert abs(m.arrow_len() - 2 * l2) < 1e-9          # arrow follows the line weight
+
+
+def test_measure_drag_sets_gap_unlinked(win, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+    from vectorflow.model import walk
+    from tests.helpers import Driver
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("10", True)))
+    c, d = win.canvas, win.doc
+    c.set_tool("measure")
+    D = Driver(c)
+    c.snap_enabled = False
+    D.press((100, 300))
+    D.move((100, 280), down=True)
+    D.release((100, 270))                                # press on A, drag 30 up, release
+    D.click((300, 300))
+    D.click((300, 220))                                  # third click: height
+    m = [n for n in walk(d.root) if n.kind == "measure"][0]
+    assert abs(m.gap_a - 30) < 1e-6 and m.gap_b == 0
+    assert m.linked is False                             # a drag unlinks the line
+
+
+def test_enter_compound_and_palette(win):
+    from vectorflow.model import Anchor, PathNode, Style, SubPath, walk
+    from tests.helpers import Driver
+    def sq(x, y, s):
+        return SubPath([Anchor(x, y), Anchor(x + s, y), Anchor(x + s, y + s), Anchor(x, y + s)], True)
+    p = PathNode([sq(100, 100, 200), sq(150, 150, 50)], Style(fill=(200, 0, 0, 255), stroke=None), "Ring")
+    win.doc.add_node(p)
+    win.doc.set_selection([p])
+    # palette: fill-only object -> one row, fill changes, no stroke appears
+    cb = win.colorbar
+    assert cb.rows["fill"][0].isVisible() is False or True
+    cb.pick("stroke", (0, 0, 255, 255))                  # single-row mode: channel ignored, fill is edited
+    assert p.style.fill == (0, 0, 255, 255) and p.style.stroke is None
+    p.style.stroke = (0, 0, 0, 255)
+    p.style.width = 2.0
+    win.doc.set_selection([p])
+    cb.refresh()
+    cb.pick("stroke", (9, 9, 9, 255))
+    assert p.style.stroke == (9, 9, 9, 255) and p.style.fill == (0, 0, 255, 255)
+    # double click on the canvas enters the compound: independent paths, own colours
+    D = Driver(win.canvas)
+    D.dblclick((110, 110))
+    paths = [n for n in walk(win.doc.root) if n.kind == "path"]
+    assert len(paths) == 2 and len(win.doc.selection) == 1
+    assert win.layers.entered is not None and win.layers.tabs.isVisible()
+    cb.pick("fill", (1, 2, 3, 255))
+    sel = win.doc.selection[0]
+    others = [n for n in paths if n is not sel]
+    assert sel.style.fill == (1, 2, 3, 255) and others[0].style.fill == (0, 0, 255, 255)

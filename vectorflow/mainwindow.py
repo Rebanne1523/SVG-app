@@ -7,8 +7,9 @@ from PySide6.QtCore import QRectF, QSettings, QSize, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence, QPalette
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
                                QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                               QSplitter, QToolBar, QWidget, QDoubleSpinBox, QLineEdit)
+                               QSplitter, QToolBar, QWidget, QLineEdit)
 
+from .numfield import NumField
 from . import __version__, affine
 from .canvas import Canvas
 from .icons import app_icon, tool_icon
@@ -17,6 +18,7 @@ from .export_dialog import ExportDialog
 from .exporting import FORMATS, export_selection, export_units, plan_unit_paths, safe_filename
 from .model import Document, common_ancestors_pruned, fresh_copy
 from .project import PROJECT_EXT, import_into, open_document, save_project
+from .palette import PaletteBar
 from .props import StyleBar
 from .sheets_panel import SheetsPanel
 from .svg_io import ImportError_
@@ -116,8 +118,8 @@ class NewDocDialog(QDialog):
         self.preset = QComboBox()
         for name, _ in self.PRESETS:
             self.preset.addItem(name)
-        self.w = QDoubleSpinBox()
-        self.h = QDoubleSpinBox()
+        self.w = NumField()
+        self.h = NumField()
         for s in (self.w, self.h):
             s.setRange(1, 100000)
             s.setDecimals(2)
@@ -234,8 +236,12 @@ class MainWindow(QMainWindow):
         self.addToolBarBreak(Qt.TopToolBarArea)
         self.addToolBar(Qt.TopToolBarArea, self.style_bar.bar2)
         self.addToolBarBreak(Qt.TopToolBarArea)
+        self.addToolBar(Qt.TopToolBarArea, self.style_bar.bar3)
+        self.addToolBarBreak(Qt.TopToolBarArea)
         self.xform = TransformBar(lambda: self.canvas)
         self.addToolBar(Qt.TopToolBarArea, self.xform.bar)
+        self.colorbar = PaletteBar(self, lambda: self.canvas)
+        self.addToolBar(Qt.BottomToolBarArea, self.colorbar.bar)
         self.canvas.toolChanged.connect(self._tool_changed)
 
     def _tool_changed(self, name):
@@ -371,7 +377,10 @@ class MainWindow(QMainWindow):
         d.contentChanged.connect(self.xform.refresh)
         d.restored.connect(self.xform.refresh)
         d.sheetChanged.connect(self._update_title)
+        for sig in (d.selectionChanged, d.contentChanged, d.restored):
+            sig.connect(self.colorbar.refresh)
         self.style_bar.refresh()
+        self.colorbar.refresh()
         self.xform.refresh()
 
     def _unwire_doc(self):
@@ -379,7 +388,9 @@ class MainWindow(QMainWindow):
         for sig, slot in ((d.selectionChanged, self.style_bar.refresh), (d.contentChanged, self.style_bar.refresh),
                           (d.metaChanged, self._update_title), (d.restored, self.style_bar.refresh),
                           (d.selectionChanged, self.xform.refresh), (d.contentChanged, self.xform.refresh),
-                          (d.restored, self.xform.refresh), (d.sheetChanged, self._update_title)):
+                          (d.restored, self.xform.refresh), (d.sheetChanged, self._update_title),
+                          (d.selectionChanged, self.colorbar.refresh), (d.contentChanged, self.colorbar.refresh),
+                          (d.restored, self.colorbar.refresh)):
             try:
                 sig.disconnect(slot)
             except (RuntimeError, TypeError):
@@ -530,50 +541,38 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ export
     def export_dialog(self):
-        dlg = ExportDialog(self, self.doc)
+        dlg = ExportDialog(self, self.doc, self.last_dir())
         if dlg.exec() != QDialog.Accepted:
             return
         fmt = dlg.format()
         ext = fmt
         scale = dlg.scale.value()
+        bg = dlg.bg
+        folder = dlg.folder()
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, "Export", f"The folder does not exist:\n{folder}")
+            return
         if dlg.mode() == "selection":
             nodes = common_ancestors_pruned(self.doc.selection)
             if not nodes:
                 return
             sh = self.doc.sheet_of(nodes[0])
-            name = safe_filename(sh.name if sh else "selection")
-            path, _ = QFileDialog.getSaveFileName(self, "Export selection", os.path.join(self.last_dir(), f"{name}.{ext}"),
-                                                  f"{FORMATS[fmt]} (*.{ext})")
-            if not path:
-                return
-            if not path.lower().endswith("." + ext):
-                path += "." + ext
-            self._run_export(lambda: export_selection(self.doc, nodes, path, fmt, scale), [path])
-            return
-        units = dlg.chosen_units()
-        if not units:
-            return
-        if len(units) == 1:
-            name = safe_filename(units[0][0].name)
-            path, _ = QFileDialog.getSaveFileName(self, "Export", os.path.join(self.last_dir(), f"{name}.{ext}"),
-                                                  f"{FORMATS[fmt]} (*.{ext})")
-            if not path:
-                return
-            if not path.lower().endswith("." + ext):
-                path += "." + ext
-            paths = [path]
+            fake = type("U", (), {"name": sh.name if sh else "selection"})()
+            paths = plan_unit_paths([[fake]], folder, ext)
+            job = lambda: export_selection(self.doc, nodes, paths[0], fmt, scale, bg)
         else:
-            folder = QFileDialog.getExistingDirectory(self, "Export to folder", self.last_dir())
-            if not folder:
+            units = dlg.chosen_units()
+            if not units:
                 return
             paths = plan_unit_paths(units, folder, ext)
-            clash = [os.path.basename(p) for p in paths if os.path.exists(p)]
-            if clash:
-                r = QMessageBox.question(self, "Overwrite?", "These files already exist and will be replaced:\n\n"
-                                         + "\n".join(clash[:15]), QMessageBox.Yes | QMessageBox.Cancel)
-                if r != QMessageBox.Yes:
-                    return
-        self._run_export(lambda: export_units(self.doc, units, paths, fmt, scale), paths)
+            job = lambda: export_units(self.doc, units, paths, fmt, scale, bg)
+        clash = [os.path.basename(p) for p in paths if os.path.exists(p)]
+        if clash:
+            r = QMessageBox.question(self, "Overwrite?", "These files already exist and will be replaced:\n\n"
+                                     + "\n".join(clash[:15]), QMessageBox.Yes | QMessageBox.Cancel)
+            if r != QMessageBox.Yes:
+                return
+        self._run_export(job, paths)
 
     def _run_export(self, fn, paths):
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -722,6 +721,11 @@ class MainWindow(QMainWindow):
 def main(argv=None):
     import sys
     argv = list(sys.argv if argv is None else argv)
+    # Ask the desktop for its own file dialogs (Dolphin on KDE) through xdg-desktop-portal; the Qt that
+    # ships with the app has no KDE platform theme of its own.
+    if os.environ.get("QT_QPA_PLATFORM", "") not in ("offscreen", "minimal") \
+            and os.environ.get("VECTORFLOW_QT_DIALOGS") != "1":
+        os.environ["QT_QPA_PLATFORMTHEME"] = "xdgdesktopportal"
     app = QApplication(argv)
     app.setApplicationName("VectorFlow")
     app.setDesktopFileName("vectorflow")

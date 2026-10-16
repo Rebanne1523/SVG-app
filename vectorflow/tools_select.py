@@ -295,7 +295,7 @@ class SelectTool(Tool):
         i = self.handle
         hp = self._handle_point(r, i)
         cur = ev.p
-        if not ev.shift:
+        if not ev.shift or ev.ctrl:      # Shift = proportional (no snap); Shift+Ctrl = proportional + snap
             cur, _ = self.canvas.snap_point(cur, self._exclude, axes=True)
         else:
             self.canvas.clear_snap()
@@ -399,6 +399,9 @@ class SelectTool(Tool):
             return
         if node.kind in ("text", "measure"):
             self.canvas.edit_node_text(node)
+        elif node.kind == "path" and len(node.subpaths) > 1:
+            self.doc.enter_compound(node)
+            self.say("Inside the compound path: each sub-path is now its own path (see the Inside tab in Layers).")
 
     def key_press(self, e):
         key = e.key()

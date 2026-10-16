@@ -5,8 +5,9 @@ import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QDoubleSpinBox, QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
+from .numfield import NumField
 from .geometry import catmull_to_bezier, constrain_angle_projected, dist, rdp
 from .model import Anchor, PathNode, SubPath, TextNode
 from .tools_base import Tool
@@ -240,7 +241,7 @@ class PencilTool(Tool):
         lay = QHBoxLayout(w)
         lay.setContentsMargins(4, 0, 4, 0)
         lay.addWidget(QLabel("Smoothing:"))
-        sp = QDoubleSpinBox()
+        sp = NumField()
         sp.setRange(0.2, 10.0)
         sp.setSingleStep(0.2)
         sp.setValue(self.smooth)
@@ -331,7 +332,7 @@ class ShapeTool(Tool):
         lay = QHBoxLayout(w)
         lay.setContentsMargins(4, 0, 4, 0)
         lay.addWidget(QLabel("Corner radius:"))
-        sp = QDoubleSpinBox()
+        sp = NumField()
         sp.setRange(0, 5000)
         sp.setValue(self.radius)
         sp.valueChanged.connect(lambda v: setattr(self, "radius", v))

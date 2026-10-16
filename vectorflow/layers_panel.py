@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel, QMenu, QSlider,
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel, QMenu, QSlider, QTabBar,
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .icons import swatch_icon, ui_icon
@@ -71,7 +71,11 @@ class LayerTree(QTreeWidget):
         item = self.itemAt(e.position().toPoint())
         col = self.columnAt(int(e.position().x()))
         if item is not None and col == COL_NAME:
-            self.panel.begin_rename(item)
+            n = item.node
+            if n.kind == "path" and len(n.subpaths) > 1:
+                self.panel.get_doc().enter_compound(n)      # double-click a compound path: go inside
+            else:
+                self.panel.begin_rename(item)
             return
         super().mouseDoubleClickEvent(e)
 
@@ -115,6 +119,17 @@ class LayersPanel(QWidget):
         row.addWidget(self.opacity_label)
         lay.addLayout(row)
 
+        self.entered = None
+        self.tabs = QTabBar()
+        self.tabs.setExpanding(False)
+        self.tabs.setTabsClosable(True)
+        self.tabs.addTab("Layers")
+        self.tabs.setTabButton(0, QTabBar.RightSide, None)
+        self.tabs.setVisible(False)
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.tabs.tabCloseRequested.connect(lambda i: self.exit_entered())
+        lay.addWidget(self.tabs)
+
         self.tree = LayerTree(self)
         lay.addWidget(self.tree, 1)
 
@@ -154,6 +169,7 @@ class LayersPanel(QWidget):
         d.sheetChanged.connect(self.rebuild)
         d.selectionChanged.connect(self.sync_from_doc)
         d.contentChanged.connect(self.refresh_icons)
+        d.entered.connect(self.enter)
 
     def disconnect_doc(self):
         d = getattr(self, "_doc", None)
@@ -161,7 +177,7 @@ class LayersPanel(QWidget):
             return
         for sig, slot in ((d.structureChanged, self.rebuild), (d.sheetChanged, self.rebuild),
                           (d.selectionChanged, self.sync_from_doc),
-                          (d.contentChanged, self.refresh_icons)):
+                          (d.contentChanged, self.refresh_icons), (d.entered, self.enter)):
             try:
                 sig.disconnect(slot)
             except (RuntimeError, TypeError):
@@ -225,15 +241,53 @@ class LayersPanel(QWidget):
                 ci.setExpanded(True)
         self._building = False
 
+    def enter(self, group):
+        self.entered = group
+        while self.tabs.count() > 1:
+            self.tabs.removeTab(1)
+        self.tabs.addTab("Inside: " + group.name)
+        self.tabs.setVisible(True)
+        self.tabs.blockSignals(True)
+        self.tabs.setCurrentIndex(1)
+        self.tabs.blockSignals(False)
+        self.rebuild()
+
+    def exit_entered(self):
+        self.entered = None
+        while self.tabs.count() > 1:
+            self.tabs.removeTab(1)
+        self.tabs.setVisible(False)
+        self.rebuild()
+
+    def _tab_changed(self, i):
+        if i == 0 and self.entered is not None:
+            self.exit_entered()
+
+    def _entered_valid(self):
+        g = self.entered
+        d = self.get_doc()
+        if g is None:
+            return False
+        n = g
+        while n is not None and n is not d.root:
+            n = n.parent
+        return n is d.root and d.sheet_of(g) is d.current_sheet()
+
     def rebuild(self):
         d = self.get_doc()
+        if self.entered is not None and not self._entered_valid():
+            self.entered = None
+            while self.tabs.count() > 1:
+                self.tabs.removeTab(1)
+            self.tabs.setVisible(False)
         self._syncing = True
         self._building = True
         self.tree.clear()
         self.item_of = {}
         self._hl = None
         cur = d.current_sheet()
-        for c in reversed(cur.children if cur is not None else []):
+        top = self.entered if self.entered is not None else cur
+        for c in reversed(top.children if top is not None else []):
             it = self._make_item(c)
             self.tree.addTopLevelItem(it)
             if c.is_group() and c.expanded:
@@ -278,7 +332,12 @@ class LayersPanel(QWidget):
         chain.reverse()
         # chain[0] is the root group, chain[1] the sheet (not shown: the panel lists the sheet's layers)
         cur = None
-        for n in chain[2:]:
+        start = 2
+        if self.entered is not None:
+            if self.entered not in chain:
+                return None
+            start = chain.index(self.entered) + 1
+        for n in chain[start:]:
             it = self.item_of.get(id(n))
             if it is None and cur is not None:
                 self._populate(cur)
@@ -455,7 +514,7 @@ class LayersPanel(QWidget):
             return False
         P = QAbstractItemView.DropIndicatorPosition
         if target is None or pos == P.OnViewport:
-            parent, index = d.current_sheet(), 0
+            parent, index = (self.entered or d.current_sheet()), 0
         elif pos == P.OnItem and target.is_group():
             parent, index = target, len(target.children)
         elif pos in (P.AboveItem, P.OnItem):

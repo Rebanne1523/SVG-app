@@ -602,9 +602,11 @@ class MeasureNode(Node):
 
     def __init__(self, a, b, offset, text="", mode_a="leg", mode_b="leg", style=None,
                  family="DejaVu Sans", font_size=14.0, text_color=(0, 0, 0, 255),
-                 bold=False, italic=False, name="Measure"):
+                 bold=False, italic=False, name="Measure", gap_a=0.0, gap_b=0.0, linked=True):
         super().__init__(name)
         self.a, self.b = tuple(a), tuple(b)
+        self.gap_a, self.gap_b = float(gap_a), float(gap_b)   # arrow tip distance from the measured point
+        self.linked = bool(linked)                            # follows the project-wide height / gap
         self.offset = float(offset)
         self.text = text
         self.mode_a, self.mode_b = mode_a, mode_b
@@ -642,12 +644,15 @@ class MeasureNode(Node):
         segs = [(a2, b2)]
         arrows = []
         sgn = 1.0 if d >= 0 else -1.0
-        for pt, p2, mode, out in ((self.a, a2, self.mode_a, (-ux, -uy)), (self.b, b2, self.mode_b, (ux, uy))):
+        for pt, p2, mode, out, gap in ((self.a, a2, self.mode_a, (-ux, -uy), self.gap_a),
+                                       (self.b, b2, self.mode_b, (ux, uy), self.gap_b)):
             if straight or mode == "line":
                 arrows.append((p2, out))
             else:
-                segs.append((p2, pt))
-                arrows.append((pt, (-nx * sgn, -ny * sgn)))
+                g = min(max(gap, 0.0), abs(d) * 0.9)
+                tip = (pt[0] + nx * sgn * g, pt[1] + ny * sgn * g)
+                segs.append((p2, tip))
+                arrows.append((tip, (-nx * sgn, -ny * sgn)))
         theta = math.degrees(math.atan2(uy, ux))
         if theta > 89.999:
             theta -= 180          # vertical text reads bottom-to-top
@@ -661,7 +666,8 @@ class MeasureNode(Node):
         return {"segs": segs, "arrows": arrows, "text_pos": mid, "text_angle": theta}
 
     def arrow_len(self):
-        return arrow_length(self.style)
+        # proportional to the line weight, so thickening the line enlarges the arrows
+        return self.style.arrow_size * self.style.width * 7.0
 
     def text_path(self):
         p = getattr(self, "_c_text", None)
@@ -710,10 +716,11 @@ class MeasureNode(Node):
         return path, shapes
 
     def get_geom(self):
-        return (self.a, self.b, self.offset, self.font_size, self.style.width, copy.deepcopy(self.clip))
+        return (self.a, self.b, self.offset, self.font_size, self.style.width, copy.deepcopy(self.clip),
+                self.gap_a, self.gap_b)
 
     def set_geom(self, g):
-        self.a, self.b, self.offset, self.font_size, self.style.width, clip = g
+        self.a, self.b, self.offset, self.font_size, self.style.width, clip, self.gap_a, self.gap_b = g
         self.clip = copy.deepcopy(clip)
         self.touch()
 
@@ -729,6 +736,8 @@ class MeasureNode(Node):
         dot = n_new[0] * nnx + n_new[1] * nny
         self.offset = self.offset * s * (1.0 if dot >= 0 else -1.0)
         self.font_size *= s
+        self.gap_a *= s
+        self.gap_b *= s
         if scale_stroke:
             self.style.width *= s
         self._transform_clip(m)
@@ -765,7 +774,8 @@ class MeasureNode(Node):
                 "bold": self.bold, "italic": self.italic, "width": self.style.width,
                 "stroke": list(self.style.stroke) if self.style.stroke else None,
                 "dash": self.style.dash, "cap": self.style.cap, "arrow_size": self.style.arrow_size,
-                "arrow_kind": self.arrow_kind}
+                "arrow_kind": self.arrow_kind, "gap_a": self.gap_a, "gap_b": self.gap_b,
+                "linked": self.linked}
 
     @staticmethod
     def from_data(d, name="Measure"):
@@ -775,7 +785,8 @@ class MeasureNode(Node):
         m = MeasureNode(d["a"], d["b"], d["offset"], d.get("text", ""), d.get("mode_a", "leg"),
                         d.get("mode_b", "leg"), st, d.get("family", "DejaVu Sans"),
                         d.get("font_size", 14.0), tuple(d.get("text_color", (0, 0, 0, 255))),
-                        d.get("bold", False), d.get("italic", False), name)
+                        d.get("bold", False), d.get("italic", False), name,
+                        d.get("gap_a", 0.0), d.get("gap_b", 0.0), d.get("linked", True))
         m.arrow_kind = d.get("arrow_kind", "triangle")
         return m
 
@@ -843,6 +854,7 @@ class Document(QObject):
     restored = Signal()
     metaChanged = Signal()
     sheetChanged = Signal()
+    entered = Signal(object)       # a compound path was opened into a folder of independent paths
 
     def __init__(self, width=1920.0, height=1080.0, pt_per_unit=0.75):
         super().__init__()
@@ -1316,6 +1328,27 @@ class Document(QObject):
                     out.append(piece)
         self.set_selection(out)
         return out
+
+    def enter_compound(self, path):
+        """Open a compound path: it becomes a folder holding one independent path per sub-path, each
+        with its own fill and stroke. Returns the folder."""
+        if path.kind != "path" or len(path.subpaths) < 2 or path.parent is None:
+            return None
+        parent = path.parent
+        idx = parent.children.index(path)
+        grp = Group(path.name or "Compound")
+        grp.opacity = path.opacity
+        with self.edit(structure=True):
+            parent.children.remove(path)
+            path.parent = None
+            parent.add(grp, idx)
+            for sp in path.subpaths:
+                piece = PathNode([sp.copy()], path.style.copy(), self.new_name("Path"))
+                piece.clip = [c.copy() for c in path.clip] if path.clip else None
+                grp.add(piece)
+        self.set_selection(list(grp.children[:1]))
+        self.entered.emit(grp)
+        return grp
 
     # style ------------------------------------------------------------
     def style_targets(self, nodes):

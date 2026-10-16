@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (QColorDialog, QComboBox, QDoubleSpinBox, QFontComboBox, QLabel, QToolBar,
+from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QFontComboBox, QLabel, QToolBar,
                                QToolButton, QWidget)
 
+from .numfield import NumField
 from .icons import preview_icon
 from .model import ARROW_TYPES, CAPS, DASH_PRESETS, JOINS, leaves, qcolor
 
@@ -70,6 +71,11 @@ def combo_with_icons(kind, values, labels=None, width=96):
     return cb
 
 
+# measurement settings that follow the "apply to all measurements" checkbox
+MEASURE_GLOBAL = {"width", "stroke", "dash", "cap", "arrow_size", "arrow_kind", "size", "family", "bold",
+                  "italic", "text_color"}
+
+
 class StyleBar:
     """Owns two toolbars: row 1 = vector style, row 2 = text / measurement options."""
 
@@ -80,7 +86,8 @@ class StyleBar:
         self._acts = {}
         self.bar1 = QToolBar("Style")
         self.bar2 = QToolBar("Text and measurement")
-        for b in (self.bar1, self.bar2):
+        self.bar3 = QToolBar("Measurement project settings")
+        for b in (self.bar1, self.bar2, self.bar3):
             b.setMovable(False)
             b.setIconSize(QSize(20, 20))
         self._build_row1()
@@ -122,7 +129,7 @@ class StyleBar:
         self._add(b, self.stroke_none)
         b.addSeparator()
         self._lab(b, "Width")
-        self.width = QDoubleSpinBox()
+        self.width = NumField()
         self.width.setRange(0.0, 1000.0)
         self.width.setDecimals(2)
         self.width.setSingleStep(0.5)
@@ -155,7 +162,7 @@ class StyleBar:
         self.arrow_end.currentIndexChanged.connect(lambda i: self._arrow_changed("end", i))
         self._add(b, self.arrow_end)
         self.arrow_size_lbl = self._lab(b, "Arrow size")
-        self.arrow_size = QDoubleSpinBox()
+        self.arrow_size = NumField()
         self.arrow_size.setRange(0.2, 20.0)
         self.arrow_size.setSingleStep(0.1)
         self.arrow_size.setValue(1.0)
@@ -170,7 +177,7 @@ class StyleBar:
         self.font.setMinimumWidth(170)
         self.font.currentFontChanged.connect(lambda f: self._apply(family=f.family()))
         self._add(b, self.font)
-        self.size = QDoubleSpinBox()
+        self.size = NumField()
         self.size.setRange(1.0, 5000.0)
         self.size.setDecimals(1)
         self.size.setSuffix(" px")
@@ -219,6 +226,34 @@ class StyleBar:
         self.edit_text.setText("Edit text…")
         self.edit_text.clicked.connect(self._edit_text)
         self._add(b, self.edit_text)
+        self.all_chk = QCheckBox("Apply to all measurements")
+        self.all_chk.setChecked(True)
+        self.all_chk.setToolTip("On: size, thickness, colour, style, height and arrow distance edit every "
+                                "measurement in the project. Off: only the selected one.")
+        self._add(self.bar3, self.all_chk)
+        self.height_lbl = self._lab(self.bar3, "Height")
+        self.height = NumField()
+        self.height.setRange(0.0, 100000.0)
+        self.height.setDecimals(2)
+        self.height.setSuffix(" px")
+        self.height.setToolTip("Height of the U / L (distance from the measured points to the dimension line)")
+        self.height.valueChanged.connect(lambda v: self._apply_geom("height", v))
+        self._add(self.bar3, self.height)
+        self.gap_lbl = self._lab(self.bar3, "Arrow distance")
+        self.gapf = NumField()
+        self.gapf.setRange(0.0, 100000.0)
+        self.gapf.setDecimals(2)
+        self.gapf.setSuffix(" px")
+        self.gapf.setToolTip("How far each arrow sits from the point it measures")
+        self.gapf.valueChanged.connect(lambda v: self._apply_geom("gap", v))
+        self._add(self.bar3, self.gapf)
+        self.link_chk = QCheckBox("Link height")
+        self.link_chk.setChecked(True)
+        self.link_chk.setToolTip("Linked: Height and Arrow distance follow the project-wide value. "
+                                 "Unlinked: this measurement keeps its own.")
+        self.link_chk.toggled.connect(self._link_toggled)
+        self._add(self.bar3, self.link_chk)
+        self.row3_measure = [self.all_chk, self.height_lbl, self.height, self.gap_lbl, self.gapf, self.link_chk]
         self.row2_measure = [self.m_sep, self.mode_a_lbl, self.mode_a, self.mode_b_lbl, self.mode_b, self.flip,
                              self.edit_text, self.tcolor_lbl, self.tcolor]
         self.row2_text = [self.font_lbl, self.font, self.size_lbl, self.size, self.bold, self.italic]
@@ -283,6 +318,9 @@ class StyleBar:
                 self.tcolor.set_color(first.text_color)
                 self.mode_a.setCurrentIndex(0 if first.mode_a == "leg" else 1)
                 self.mode_b.setCurrentIndex(0 if first.mode_b == "leg" else 1)
+                self.height.setValue(abs(first.offset))
+                self.gapf.setValue(first.gap_a)
+                self.link_chk.setChecked(first.linked)
         finally:
             self._silent = False
         has_measure = "measure" in kinds
@@ -291,6 +329,7 @@ class StyleBar:
         text_ctx = has_text or has_measure or tool in ("text", "measure")
         self.bar2.setVisible(text_ctx)
         self._set_vis(self.row2_measure, has_measure)
+        self.bar3.setVisible(has_measure)
         self._set_vis([self.fill_lbl, self.fill, self.fill_none], not only_measure)
         arrows_ok = (not kinds) or bool(kinds & {"path", "measure"})
         self._set_vis([self.arrow_end_lbl, self.arrow_end, self.arrow_size_lbl, self.arrow_size], arrows_ok)
@@ -304,7 +343,15 @@ class StyleBar:
         doc = self.doc
         sel = doc.selection
         if sel:
-            doc.apply_style(sel, merge_key=merge, **kv)
+            gk = {k: v for k, v in kv.items() if k in MEASURE_GLOBAL}
+            allm = self._all_measures() if gk and self.all_chk.isChecked() and self._sel_measures() else []
+            if allm and not self._others_selected():
+                nodes = list(sel) + [m for m in allm if m not in self._sel_measures()]
+                doc.apply_style(nodes, merge_key=merge, **kv)
+            else:
+                doc.apply_style(sel, merge_key=merge, **kv)
+                if allm:
+                    doc.apply_style(allm, merge_key=merge, **gk)
             # new shapes keep using the last style the user picked (like Illustrator / Photoshop)
             if any(l.kind == "path" for n in sel for l in (leaves(n) if n.is_group() else [n])):
                 for k, v in kv.items():
@@ -358,6 +405,42 @@ class StyleBar:
             self.doc.apply_style(measures, arrow_kind=v if v != "none" else "triangle")
         if others or not sel:
             self._apply(**{"arrow_" + which: v})
+
+    def _sel_measures(self):
+        return [l for n in self.doc.selection for l in (leaves(n) if n.is_group() else [n]) if l.kind == "measure"]
+
+    def _others_selected(self):
+        return any(l.kind != "measure" for n in self.doc.selection for l in (leaves(n) if n.is_group() else [n]))
+
+    def _all_measures(self):
+        return [l for l in leaves(self.doc.root) if l.kind == "measure"]
+
+    def _apply_geom(self, what, v):
+        if self._silent:
+            return
+        sel = self._sel_measures()
+        if not sel:
+            return
+        targets = list(sel)
+        if self.all_chk.isChecked() and all(m.linked for m in sel):
+            targets += [m for m in self._all_measures() if m.linked and m not in sel]
+        with self.doc.edit(merge_key="mgeom-" + what):
+            for m in targets:
+                if what == "height":
+                    m.offset = v if m.offset >= 0 else -v
+                else:
+                    m.gap_a = m.gap_b = v
+                m.touch()
+
+    def _link_toggled(self, on):
+        if self._silent:
+            return
+        sel = self._sel_measures()
+        if not sel:
+            return
+        with self.doc.edit():
+            for m in sel:
+                m.linked = on
 
     def _flip(self):
         sel = [l for n in self.doc.selection for l in (leaves(n) if n.is_group() else [n]) if l.kind == "measure"]
