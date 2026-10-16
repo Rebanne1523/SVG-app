@@ -140,7 +140,7 @@ class LayersPanel(QWidget):
             ("layer", "New layer (top level)", lambda: self.get_doc().new_folder(as_layer=True)),
             ("folder", "New folder inside the current target", lambda: self.get_doc().new_folder()),
             ("group", "Group selection into a folder  (Ctrl+G)", self.group_selection),
-            ("dup", "Duplicate  (Ctrl+J)", self.duplicate_selection),
+            ("dup", "Duplicate  (Ctrl+D)", self.duplicate_selection),
             ("trash", "Delete  (Del)", self.delete_selection),
         ):
             b = QToolButton()

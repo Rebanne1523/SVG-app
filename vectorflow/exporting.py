@@ -16,13 +16,17 @@ def safe_filename(name):
     return out or "export"
 
 
-def plan_unit_paths(units, folder, ext):
+def plan_unit_paths(units, folder, ext, names=None):
     """Output path for every unit. A unit is a list of sheets exported together; it is named after its
-    first sheet, i.e. after the file that was imported. Equal names get " (2)", " (3)"..."""
+    first sheet, i.e. after the file that was imported, unless ``names[i]`` gives another name.
+    Equal names get " (2)", " (3)"..."""
     used = {}
     paths = []
-    for unit in units:
-        base = safe_filename(unit[0].name)
+    for i, unit in enumerate(units):
+        custom = (names[i] if names and i < len(names) else "") or ""
+        if custom.lower().endswith("." + ext):
+            custom = custom[:-len(ext) - 1]
+        base = safe_filename(custom.strip() or unit[0].name)
         n = used.get(base.lower(), 0) + 1
         used[base.lower()] = n
         fname = f"{base}.{ext}" if n == 1 else f"{base} ({n}).{ext}"

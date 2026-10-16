@@ -71,8 +71,8 @@ Abrir archivos directamente: `./run.sh plano.pdf detalle.pdf` o `vectorflow proy
 
 ### Trazos: combinar y separar
 
-- `Ctrl+K` **combina** varios trazos en un solo trazo compuesto (como una letra con agujeros: cada forma queda como subtrazo y los huecos funcionan).
-- `Ctrl+Shift+K` **separa** un trazo compuesto en un trazo por cada subtrazo.
+- `Ctrl+J` **combina** varios trazos en un solo trazo compuesto (como una letra con agujeros: cada forma queda como subtrazo y los huecos funcionan).
+- `Ctrl+Shift+J` **separa** un trazo compuesto en un trazo por cada subtrazo.
 
 - **Entrar en un compuesto:** doble clic sobre él (en el lienzo o en el panel de capas). Se abre en una carpeta de trazos independientes, cada uno con su propio relleno y trazo, y el panel de capas muestra una pestaña **Inside: …**. Ojo: al separarse, los huecos dejan de serlo (un anillo pasa a ser dos círculos); `Ctrl+Z` lo deshace.
 
@@ -91,7 +91,7 @@ Un clic en la paleta cambia el color de lo seleccionado **sin añadir nada que n
 | Dónde dibujo | El texto **"Drawing in: …"** muestra la capa/carpeta de destino (resaltada). Es la carpeta del elemento seleccionado. |
 | Ojo / candado | Mostrar-ocultar / bloquear. `Alt`+clic en el ojo = mostrar solo ese. Lo oculto o bloqueado no se puede seleccionar con el ratón. |
 | Renombrar | Doble clic o `F2`. |
-| Crear | Botones de abajo: nueva capa, nueva carpeta, agrupar (`Ctrl+G`), duplicar (`Ctrl+J`), borrar. Clic derecho = más opciones. |
+| Crear | Botones de abajo: nueva capa, nueva carpeta, agrupar (`Ctrl+G`), duplicar (`Ctrl+D`), borrar. Clic derecho = más opciones. |
 | Opacidad | Control deslizante sobre la lista. |
 
 En la barra de opciones de **Mover** puedes elegir si el clic selecciona el *elemento exacto* o el *elemento de primer nivel de su capa* (la carpeta completa).
@@ -161,7 +161,7 @@ Dicho con claridad para que no haya sorpresas:
 - Los **degradados** se convierten a un color plano; **patrones, filtros y máscaras** se ignoran (los `clipPath` sí se respetan). Solo se cargan imágenes incrustadas.
 - El texto de un PDF se importa como contornos (no es editable como texto).
 - El relleno del cubo es un polígono (curvas aplanadas con tolerancia muy fina), no reutiliza las curvas originales; en un hueco cerrado por tolerancia puede asomar una pequeña "mejilla" de hasta la mitad de ese valor.
-- Un trazo combinado (`Ctrl+K`) usa siempre relleno par-impar, para que los agujeros funcionen.
+- Un trazo combinado (`Ctrl+J`) usa siempre relleno par-impar, para que los agujeros funcionen.
 - El snapping de medición es a la línea central del trazo, no al borde exterior del grosor.
 - No hay (todavía) reglas, guías, cuadrícula, operaciones booleanas, degradados ni texto sobre trazado.
 - La caja de selección siempre está alineada a los ejes (tras rotar varios objetos la caja vuelve a ser horizontal).

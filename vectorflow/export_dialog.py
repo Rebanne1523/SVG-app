@@ -67,13 +67,15 @@ class UnitList(QListWidget):
 class ExportDialog(QDialog):
     """Document / Page / Selection, page tiles with previews, folder + format, one big Export button."""
 
-    def __init__(self, parent, doc, folder=""):
+    def __init__(self, parent, doc, folder="", sel_name=""):
         super().__init__(parent)
         self.setWindowTitle("Export")
         self.resize(640, 640)
         self.doc = doc
         self.bg = None                                      # None = transparent
         self.units = [[s] for s in doc.sheets()]          # list of lists of Sheet
+        self.names = {}                                    # custom file names: id(unit) / "doc" / "sel"
+        self.sel_name = sel_name or "selection"
         lay = QVBoxLayout(self)
 
         modes = QHBoxLayout()
@@ -127,6 +129,13 @@ class ExportDialog(QDialog):
         self._paint_bg()
 
         row = QHBoxLayout()
+        row.addWidget(QLabel("File name"))
+        self.name_edit = QLineEdit()
+        self.name_edit.textEdited.connect(self._name_edited)
+        row.addWidget(self.name_edit, 1)
+        lay.addLayout(row)
+
+        row = QHBoxLayout()
         self.folder_edit = QLineEdit(folder)
         self.folder_edit.setPlaceholderText("Folder to save into")
         row.addWidget(self.folder_edit, 1)
@@ -158,6 +167,7 @@ class ExportDialog(QDialog):
         self.mode_group.buttonToggled.connect(self._mode_changed)
         self.only_sel.toggled.connect(self._only_sel_toggled)
         self.list.itemSelectionChanged.connect(self._sync_checks)
+        self.list.itemDoubleClicked.connect(lambda _i: (self.name_edit.setFocus(), self.name_edit.selectAll()))
         self.folder_edit.textChanged.connect(self._update_ok)
         self.rebuild(select_current=True)
         self._format_changed()
@@ -216,6 +226,7 @@ class ExportDialog(QDialog):
         if not self.merge_allowed():
             self.separate_all()
         self._update_hint()
+        self._refresh_name()
 
     def _mode_changed(self, *_):
         m = self.mode()
@@ -227,6 +238,7 @@ class ExportDialog(QDialog):
         self.only_sel.blockSignals(False)
         self._update_hint()
         self._update_ok()
+        self._refresh_name()
 
     def _update_hint(self):
         m = self.mode()
@@ -247,6 +259,67 @@ class ExportDialog(QDialog):
             it = self.list.item(i)
             it.setCheckState(Qt.Checked if it.isSelected() else Qt.Unchecked)
         self._update_ok()
+        self._refresh_name()
+
+    # ------------------------------------------------------------ file names
+    def _name_key(self):
+        """Key of the single export target whose name the field edits (None = several / none)."""
+        m = self.mode()
+        if m == "selection":
+            return "sel"
+        if m == "document":
+            return "doc" if self.format() == "pdf" else None
+        sel = self.list.selectedItems()
+        if len(sel) == 1:
+            u = self._unit_of(sel[0])
+            return id(u) if u is not None else None
+        return None
+
+    def _default_name(self, key):
+        if key == "sel":
+            return self.sel_name
+        if key == "doc":
+            return self.units[0][0].name if self.units else ""
+        u = next((u for u in self.units if id(u) == key), None)
+        return u[0].name if u else ""
+
+    def _refresh_name(self):
+        key = getattr(self, "name_edit", None) and self._name_key()
+        if not hasattr(self, "name_edit"):
+            return
+        self.name_edit.blockSignals(True)
+        if key is None:
+            self.name_edit.setEnabled(False)
+            self.name_edit.setText("")
+            self.name_edit.setPlaceholderText("Each file keeps its own name (select one page to rename it)")
+        else:
+            self.name_edit.setEnabled(True)
+            self.name_edit.setText(self.names.get(key) or self._default_name(key))
+            self.name_edit.setPlaceholderText("")
+        self.name_edit.blockSignals(False)
+
+    def _name_edited(self, text):
+        key = self._name_key()
+        if key is None:
+            return
+        self.names[key] = text
+        if key not in ("sel", "doc"):
+            for i in range(self.list.count()):
+                it = self.list.item(i)
+                if it.data(Qt.UserRole) == key:
+                    u = self._unit_of(it)
+                    it.setText(self._label(u))
+
+    def _label_name(self, unit):
+        return self.names.get(id(unit)) or unit[0].name
+
+    def target_names(self, units):
+        """Custom names matching ``chosen_units()`` / the selection export ("" = default)."""
+        if self.mode() == "selection":
+            return [self.names.get("sel", "")]
+        if self.mode() == "document":
+            return [self.names.get("doc", "")] if self.format() == "pdf" else [""] * len(units)
+        return [self.names.get(id(u), "") for u in units]
 
     def _update_ok(self, *_):
         ok = bool(self.folder()) and (self.mode() != "pages" or bool(self.list.selectedItems()))
@@ -267,11 +340,11 @@ class ExportDialog(QDialog):
                 it.setSelected(True)
         self._sync_checks()
 
-    @staticmethod
-    def _label(unit):
+    def _label(self, unit):
+        name = self._label_name(unit)
         if len(unit) == 1:
-            return unit[0].name
-        return f"{unit[0].name}\n+ {len(unit) - 1} more page(s)"
+            return name
+        return f"{name}\n+ {len(unit) - 1} more page(s)"
 
     def _unit_of(self, item):
         uid = item.data(Qt.UserRole)

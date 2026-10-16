@@ -389,7 +389,8 @@ class Canvas(QWidget):
                 for c in node.children:
                     rec(c)
                 return
-            if rect.intersects(node.bounds()) and node.shape_path().intersects(rect):
+            # padded: a perfectly horizontal / vertical line has an empty bounding box (rect.intersects is False)
+            if rect.intersects(node.bounds().adjusted(-1, -1, 1, 1)) and node.shape_path().intersects(rect):
                 out.append(node)
 
         for c in self.doc.root.children:

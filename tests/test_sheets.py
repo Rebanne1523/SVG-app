@@ -455,3 +455,25 @@ def test_ctrl_s_saves_in_place(win, monkeypatch, tmp_path):
     win.doc.add_node(PathNode([SubPath([Anchor(1, 1), Anchor(5, 5)], False)], Style(), "y"))
     win.save()
     assert len(calls) == 1 and win.doc.path == target
+
+
+def test_marquee_selects_straight_and_hairline_paths(qapp):
+    from PySide6.QtCore import QRectF
+    from vectorflow.model import PathNode, Style
+    st = Style(fill=None, stroke=(0, 0, 0, 255), width=2)
+    nodes = [PathNode.polyline([(10, 10), (50, 10)], False, st),
+             PathNode.polyline([(10, 10), (10, 50)], False, st),
+             PathNode.polyline([(10, 10), (50, 40)], False, Style(fill=None, stroke=(0, 0, 0, 255), width=0)),
+             PathNode.polyline([(10, 10), (50, 40), (10, 40)], True, Style(fill=None, stroke=None, width=1))]
+    r = QRectF(0, 0, 100, 100)
+    for n in nodes:
+        assert r.intersects(n.bounds().adjusted(-1, -1, 1, 1)) and n.shape_path().intersects(r)
+
+
+def test_export_custom_names(tmp_path):
+    from vectorflow.exporting import plan_unit_paths
+    U = type("U", (), {})
+    a, b = U(), U()
+    a.name, b.name = "one", "two"
+    p = plan_unit_paths([[a], [b]], str(tmp_path), "pdf", ["renamed.pdf", ""])
+    assert [x.name for x in map(__import__("pathlib").Path, p)] == ["renamed.pdf", "two.pdf"]

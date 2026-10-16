@@ -490,9 +490,10 @@ class PathNode(Node):
             sp = QPainterPath()
             if st.fill:
                 sp = QPainterPath(path)
-            if st.stroke and st.width > 0:
+            hairline = not st.fill and not (st.stroke and st.width > 0)   # invisible / 0-width: still selectable
+            if (st.stroke and st.width > 0) or hairline:
                 stroker = QPainterPathStroker()
-                stroker.setWidth(max(st.width, 0.001))
+                stroker.setWidth(max(st.width, 0.001) if not hairline else 1.0)
                 stroker.setCapStyle({"butt": Qt.FlatCap, "round": Qt.RoundCap, "square": Qt.SquareCap}[st.cap])
                 stroker.setJoinStyle({"miter": Qt.MiterJoin, "round": Qt.RoundJoin, "bevel": Qt.BevelJoin}[st.join])
                 sp = sp.united(stroker.createStroke(path))

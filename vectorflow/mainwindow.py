@@ -51,7 +51,7 @@ SHORTCUTS_HELP = """
 <tr><td><b>Ctrl+S</b></td><td>Save the project (.vflow, all sheets in one file)</td></tr>
 <tr><td><b>Ctrl+Shift+E</b></td><td>Export pages (pick them; drag one tile onto another for a multi-page PDF) or only the selection</td></tr>
 <tr><td><b>Ctrl+V</b> / <b>Ctrl+Shift+V</b></td><td>Paste centred on the mouse / paste at the same position on the selected sheet</td></tr>
-<tr><td><b>Ctrl+K</b> / <b>Ctrl+Shift+K</b></td><td>Combine paths into one compound path / break it apart</td></tr>
+<tr><td><b>Ctrl+J</b> / <b>Ctrl+Shift+J</b></td><td>Combine paths into one compound path / break it apart</td></tr>
 <tr><td><b>Ctrl+Shift+0</b></td><td>Zoom to the current sheet</td></tr>
 <tr><td>Drag a sheet's name tag</td><td>Move the whole sheet. Drag a vector onto another sheet and it moves to that sheet.</td></tr>
 <tr><td>Scroll over a point (A tool)</td><td>Grow / shrink the selection along the path, to both sides</td></tr>
@@ -66,7 +66,7 @@ SHORTCUTS_HELP = """
 <h3>Edit</h3>
 <table cellpadding=3>
 <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>Undo / Redo</td></tr>
-<tr><td>Ctrl+C / X / V, Ctrl+J</td><td>Copy / Cut / Paste, Duplicate</td></tr>
+<tr><td>Ctrl+C / X / V, Ctrl+D</td><td>Copy / Cut / Paste, Duplicate</td></tr>
 <tr><td>Ctrl+G / Ctrl+Shift+G</td><td>Group into folder / Ungroup</td></tr>
 <tr><td>Ctrl+] / Ctrl+[</td><td>Bring forward / send backward (add Shift for front / back)</td></tr>
 <tr><td>X / D</td><td>Swap fill &amp; stroke / default colours</td></tr>
@@ -297,16 +297,16 @@ class MainWindow(QMainWindow):
         self._act(e, "&Copy", self.copy, "Ctrl+C")
         self._act(e, "&Paste (at the mouse)", lambda: self.paste(False), "Ctrl+V")
         self._act(e, "Paste in &place (same position on the sheet)", lambda: self.paste(True), "Ctrl+Shift+V")
-        self._act(e, "&Duplicate", self.duplicate, "Ctrl+J")
+        self._act(e, "&Duplicate", self.duplicate, "Ctrl+D")
         self._act(e, "De&lete", self.delete, ["Delete", "Backspace"])
         e.addSeparator()
         self._act(e, "Select &all", self.select_all, "Ctrl+A")
-        self._act(e, "D&eselect", lambda: self.doc.set_selection([]), "Ctrl+D")
+        self._act(e, "D&eselect", lambda: self.doc.set_selection([]), "Ctrl+Shift+A")
         e.addSeparator()
         self._act(e, "&Group into folder", lambda: self.layers.group_selection(), "Ctrl+G")
         self._act(e, "&Ungroup", lambda: self.layers.ungroup_selection(), "Ctrl+Shift+G")
-        self._act(e, "Co&mbine paths", self.combine, "Ctrl+K")
-        self._act(e, "Break &apart paths", self.break_apart, "Ctrl+Shift+K")
+        self._act(e, "Co&mbine paths", self.combine, "Ctrl+J")
+        self._act(e, "Break &apart paths", self.break_apart, "Ctrl+Shift+J")
         ar = e.addMenu("&Arrange")
         self._act(ar, "Bring to front", lambda: self.arrange("front"), "Ctrl+Shift+]")
         self._act(ar, "Bring forward", lambda: self.arrange("forward"), "Ctrl+]")
@@ -542,7 +542,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ export
     def export_dialog(self):
-        dlg = ExportDialog(self, self.doc, self.last_dir())
+        cur = self.doc.current_sheet()
+        dlg = ExportDialog(self, self.doc, self.last_dir(), cur.name if cur else "")
         if dlg.exec() != QDialog.Accepted:
             return
         fmt = dlg.format()
@@ -559,13 +560,13 @@ class MainWindow(QMainWindow):
                 return
             sh = self.doc.sheet_of(nodes[0])
             fake = type("U", (), {"name": sh.name if sh else "selection"})()
-            paths = plan_unit_paths([[fake]], folder, ext)
+            paths = plan_unit_paths([[fake]], folder, ext, dlg.target_names([[fake]]))
             job = lambda: export_selection(self.doc, nodes, paths[0], fmt, scale, bg)
         else:
             units = dlg.chosen_units()
             if not units:
                 return
-            paths = plan_unit_paths(units, folder, ext)
+            paths = plan_unit_paths(units, folder, ext, dlg.target_names(units))
             job = lambda: export_units(self.doc, units, paths, fmt, scale, bg)
         clash = [os.path.basename(p) for p in paths if os.path.exists(p)]
         if clash:
