@@ -139,7 +139,16 @@ def d_measure(p, c):
     p.drawLine(11, 8, 13, 8)
 
 
+def d_canvas(p, c):
+    # crop marks
+    p.drawLine(7, 3, 7, 17)
+    p.drawLine(7, 17, 21, 17)
+    p.drawLine(3, 7, 17, 7)
+    p.drawLine(17, 7, 17, 21)
+
+
 TOOL_ICONS = {
+    "canvas": d_canvas,
     "select": d_select, "direct": d_direct, "pen": d_pen, "pencil": d_pencil, "rect": d_rect,
     "ellipse": d_ellipse, "line": d_line, "text": d_text, "bucket": d_bucket, "hand": d_hand,
     "zoom": d_zoom, "measure": d_measure,

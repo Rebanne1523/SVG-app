@@ -413,3 +413,29 @@ def test_export_tiles_toggle_selection(win):
     for k in (0, 1):
         QTest.mouseClick(L.viewport(), Qt.LeftButton, Qt.NoModifier, L.visualItemRect(L.item(k)).center())
     assert [L.item(i).isSelected() for i in range(3)] == [True, True, False]
+
+
+def test_canvas_tool_resizes_page_not_content(win):
+    from PySide6.QtCore import Qt
+    from vectorflow.model import Anchor, PathNode, Style, SubPath
+    from tests.helpers import Driver
+    d, c = win.doc, win.canvas
+    sh = d.current_sheet()
+    p = PathNode([SubPath([Anchor(100, 100), Anchor(200, 100), Anchor(200, 200)], True)], Style(fill=(1, 2, 3, 255)), "T")
+    d.add_node(p)
+    before = [(a.x, a.y) for a in p.subpaths[0].anchors]
+    c.set_tool("canvas")
+    D = Driver(c)
+    w0, h0 = sh.width, sh.height
+    D.drag((sh.x + w0, sh.y + h0), (sh.x + w0 + 300, sh.y + h0 + 100))      # bottom-right handle
+    assert abs(sh.width - (w0 + 300)) < 1 and abs(sh.height - (h0 + 100)) < 1 and (sh.x, sh.y) == (0, 0)
+    D.drag((sh.x, sh.y), (sh.x + 50, sh.y + 20))                              # top-left handle
+    assert (round(sh.x), round(sh.y)) == (50, 20)
+    assert [(a.x, a.y) for a in p.subpaths[0].anchors] == before             # nothing drawn moved
+    d.undo()
+    assert (round(d.current_sheet().x), round(d.current_sheet().y)) == (0, 0)
+    tool = c.tools["canvas"]
+    tool.options_widget()
+    tool._typed("width", 640.0)
+    assert d.current_sheet().width == 640.0
+    assert tool.shortcut == "C" and c.tools["measure"].shortcut == "S"

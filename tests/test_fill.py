@@ -34,3 +34,18 @@ def test_outside_is_not_filled(qapp):
     d = doc_with_shapes()
     node, res = fill_at(d, (380, 280), (255, 0, 0, 255), gap=3.0)
     assert node is None
+
+
+def test_looks_closed_but_has_tiny_gaps():
+    """A frame made of four separate strokes that nearly touch at the corners, inside a closed outer outline:
+    the exact faces only see the OUTER area, but the fill must stay inside the visible frame."""
+    from shapely.geometry import LineString
+    from vectorflow.fill import find_region
+    outer = LineString([(0, 0), (400, 0), (400, 400), (0, 400), (0, 0)])
+    g = 2.0
+    segs = [LineString([(100 + g, 100), (300 - g, 100)]), LineString([(300, 100 + g), (300, 300 - g)]),
+            LineString([(300 - g, 300), (100 + g, 300)]), LineString([(100, 300 - g), (100, 100 + g)])]
+    res = find_region([outer] + segs, (200, 200), gap=3.0, page=(400, 400), widths=[1.0] * 5)
+    assert res.polygon is not None
+    assert res.polygon.area < 200 * 200 * 1.1           # not the 400x400 outer area
+    assert res.polygon.contains(__import__("shapely.geometry", fromlist=["Point"]).Point(200, 200))

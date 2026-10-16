@@ -190,7 +190,7 @@ class BucketTool(Tool):
 class MeasureTool(Tool):
     name = "measure"
     label = "Measure"
-    shortcut = "I"
+    shortcut = "S"
     hint = ("Click point A, click point B, then click to set the offset (U / L shape) and type the value. "
             "Scroll wheel flips the arrow at the point you just placed. Shift = 45° steps. Esc cancels.")
 

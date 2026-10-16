@@ -24,6 +24,7 @@ from .sheets_panel import SheetsPanel
 from .svg_io import ImportError_
 from .transformbar import TransformBar
 from .tools_draw import PenTool, PencilTool, ShapeTool, TextTool
+from .tools_canvas import CanvasTool
 from .tools_other import BucketTool, HandTool, MeasureTool, ZoomTool
 from .tools_select import DirectTool, SelectTool
 
@@ -184,7 +185,7 @@ class MainWindow(QMainWindow):
         c = self.canvas
         for t in (SelectTool(c), DirectTool(c), PenTool(c), PencilTool(c), ShapeTool(c, "rect"),
                   ShapeTool(c, "ellipse"), ShapeTool(c, "line"), TextTool(c), BucketTool(c), MeasureTool(c),
-                  HandTool(c), ZoomTool(c)):
+                  HandTool(c), ZoomTool(c), CanvasTool(c)):
             if t.name == "text":
                 t.name, t.label, t.shortcut = "text", "Text", "T"
             c.register_tool(t)
@@ -203,7 +204,7 @@ class MainWindow(QMainWindow):
         self.tool_group.setExclusive(True)
         self.tool_actions = {}
         order = ["select", "direct", "pen", "pencil", None, "rect", "ellipse", "line", "text", None, "bucket",
-                 "measure", None, "hand", "zoom"]
+                 "measure", "canvas", None, "hand", "zoom"]
         for name in order:
             if name is None:
                 self.toolbox.addSeparator()

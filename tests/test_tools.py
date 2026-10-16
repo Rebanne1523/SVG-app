@@ -180,7 +180,7 @@ def test_shortcuts(win, qapp):
     c = win.canvas
     c.setFocus()
     for key, name in [(Qt.Key_P, "pen"), (Qt.Key_V, "select"), (Qt.Key_A, "direct"), (Qt.Key_G, "bucket"),
-                      (Qt.Key_I, "measure"), (Qt.Key_U, "rect"), (Qt.Key_T, "text"), (Qt.Key_H, "hand")]:
+                      (Qt.Key_S, "measure"), (Qt.Key_U, "rect"), (Qt.Key_T, "text"), (Qt.Key_H, "hand")]:
         QTest.keyClick(c, key)
         assert c.tool.name == name
 

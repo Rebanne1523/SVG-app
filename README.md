@@ -109,7 +109,8 @@ En la barra de opciones de **Mover** puedes elegir si el clic selecciona el *ele
 | `U` `E` `L` | Rectángulo / Elipse / Línea | Radio de esquina en la barra de opciones. |
 | `T` | Texto | Clic para crear o editar. |
 | `G` | Cubo de pintura | Ver abajo. |
-| `I` | Medir | Ver abajo. |
+| `S` | Medir | Ver abajo. |
+| `C` | Canvas (tamaño de la hoja) | Arrastra las asas de la hoja actual para cambiar su tamaño (`Shift` = proporcional, `Alt` = desde el centro, con snapping), o escribe el ancho y alto exactos arriba. **Nada de lo dibujado se mueve**: solo cambia la hoja. Clic en otra hoja para trabajar con ella. |
 | `H` `Z` | Mano / Zoom | `Espacio` = mano temporal. |
 
 **Seleccionar puntos con la rueda** (herramienta `A`): pon el ratón sobre un punto y haz scroll hacia arriba: se van seleccionando, **hacia ambos lados del trazo**, los puntos conectados al punto desde el que empezaste (hacia abajo se va reduciendo). En la barra de opciones puedes cambiar el modo a *Nearby points (area)*, que selecciona los puntos cercanos como hace Inkscape.
@@ -131,7 +132,7 @@ Relleno, trazo, **grosor**, **tipo de línea** (sólida, rayas, puntos, punto-ra
 - `Alt`+clic recolorea la forma rellena que haya bajo el cursor.
 - El color es el de relleno actual de la barra de estilo.
 
-### Medición (`I`)
+### Medición (`S`)
 
 1. **Clic en el punto A.** El cursor se pega a puntos finales/esquinas y a bordes de otros vectores (círculo rosa + etiqueta indicando qué detectó). Al mover verás el cuadro de selección punteado y la longitud.
 2. **Clic en el punto B.** (`Shift` = ángulos de 45°.)
