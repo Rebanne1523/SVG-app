@@ -5,6 +5,7 @@ import base64
 import gzip
 import json
 import math
+from functools import lru_cache
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -63,6 +64,7 @@ def parse_length(s, default=0.0, ref=100.0, font_size=16.0):
     return v * UNIT.get(u, 1.0)
 
 
+@lru_cache(maxsize=4096)
 def parse_color(s):
     s = (s or "").strip()
     if not s or s == "none" or s == "transparent":
@@ -119,8 +121,9 @@ def parse_transform(s):
 
 
 # ---------------------------------------------------------------- path data
-def parse_path_d(d):
-    """Parse SVG path data into a list of SubPath (absolute coordinates)."""
+def _parse_path_d_slow(d):
+    """Parse SVG path data into a list of SubPath (absolute coordinates) - character by character,
+    handles every command including arcs with glued flags."""
     subpaths = []
     cur = None
     i = 0
@@ -299,6 +302,142 @@ def parse_path_d(d):
         detect_smooth(sp)
         out.append(sp)
     return out
+
+
+_TOK_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z]")
+
+
+def _finish_subpaths(subpaths):
+    out = []
+    for sp in subpaths:
+        if len(sp.anchors) < 2 and not sp.closed:
+            continue
+        if sp.closed and len(sp.anchors) > 1:
+            f, l = sp.anchors[0], sp.anchors[-1]
+            if abs(f.x - l.x) < 1e-7 and abs(f.y - l.y) < 1e-7:
+                f.ix, f.iy = l.ix, l.iy
+                sp.anchors.pop()
+        if sp.closed and len(sp.anchors) < 2:
+            continue
+        detect_smooth(sp)
+        out.append(sp)
+    return out
+
+
+def parse_path_d(d):
+    """Parse SVG path data into a list of SubPath (absolute coordinates). Tokenises with one regex
+    (several times faster than the character parser, which still handles paths with arcs)."""
+    if "a" in d or "A" in d:
+        return _parse_path_d_slow(d)
+    T = _TOK_RE.findall(d)
+    n = len(T)
+    subpaths = []
+    cur = None
+    k = 0
+    x = y = sx = sy = 0.0
+    last_cmd = ""
+    last_c2 = last_q = None
+    try:
+        while k < n:
+            t = T[k]
+            if t[0].isalpha():
+                cmd = t
+                k += 1
+            else:
+                if not last_cmd:
+                    break
+                cmd = last_cmd
+                if cmd == "M":
+                    cmd = "L"
+                elif cmd == "m":
+                    cmd = "l"
+            rel = cmd.islower()
+            c = cmd.upper()
+            if c == "Z":
+                if cur is not None:
+                    cur.closed = True
+                    x, y = sx, sy
+                    cur = None
+                last_cmd = cmd
+                last_c2 = last_q = None
+                continue
+            if c == "M":
+                nx, ny = float(T[k]), float(T[k + 1])
+                k += 2
+                if rel:
+                    nx, ny = x + nx, y + ny
+                x, y = nx, ny
+                sx, sy = x, y
+                cur = SubPath([Anchor(x, y)], False)
+                subpaths.append(cur)
+                last_c2 = last_q = None
+            elif c == "L":
+                nx, ny = float(T[k]), float(T[k + 1])
+                k += 2
+                if rel:
+                    nx, ny = x + nx, y + ny
+                if cur is None:
+                    cur = SubPath([Anchor(x, y)], False)
+                    subpaths.append(cur)
+                cur.anchors.append(Anchor(nx, ny))
+                x, y = nx, ny
+                last_c2 = last_q = None
+            elif c == "H":
+                nx = float(T[k])
+                k += 1
+                nx = x + nx if rel else nx
+                if cur is None:
+                    cur = SubPath([Anchor(x, y)], False)
+                    subpaths.append(cur)
+                cur.anchors.append(Anchor(nx, y))
+                x = nx
+                last_c2 = last_q = None
+            elif c == "V":
+                ny = float(T[k])
+                k += 1
+                ny = y + ny if rel else ny
+                if cur is None:
+                    cur = SubPath([Anchor(x, y)], False)
+                    subpaths.append(cur)
+                cur.anchors.append(Anchor(x, ny))
+                y = ny
+                last_c2 = last_q = None
+            elif c == "C" or c == "S" or c == "Q" or c == "T":
+                cnt = 6 if c == "C" else (2 if c == "T" else 4)
+                v = [float(u) for u in T[k:k + cnt]]
+                if len(v) < cnt:
+                    raise IndexError
+                k += cnt
+                if rel:
+                    v = [v[i] + (x if i % 2 == 0 else y) for i in range(cnt)]
+                if c == "C":
+                    c1, c2, p = (v[0], v[1]), (v[2], v[3]), (v[4], v[5])
+                    last_c2, last_q = c2, None
+                elif c == "S":
+                    c1 = (2 * x - last_c2[0], 2 * y - last_c2[1]) if last_c2 else (x, y)
+                    c2, p = (v[0], v[1]), (v[2], v[3])
+                    last_c2, last_q = c2, None
+                else:
+                    if c == "Q":
+                        q, p = (v[0], v[1]), (v[2], v[3])
+                    else:
+                        q = (2 * x - last_q[0], 2 * y - last_q[1]) if last_q else (x, y)
+                        p = (v[0], v[1])
+                    c1 = (x + 2.0 / 3.0 * (q[0] - x), y + 2.0 / 3.0 * (q[1] - y))
+                    c2 = (p[0] + 2.0 / 3.0 * (q[0] - p[0]), p[1] + 2.0 / 3.0 * (q[1] - p[1]))
+                    last_q, last_c2 = q, None
+                if cur is None:
+                    cur = SubPath([Anchor(x, y)], False)
+                    subpaths.append(cur)
+                cur.anchors[-1].ox, cur.anchors[-1].oy = c1
+                cur.anchors.append(Anchor(p[0], p[1], c2[0], c2[1]))
+                x, y = p
+            else:
+                break
+            last_cmd = cmd
+    except (ValueError, IndexError):
+        pass  # keep whatever was parsed
+    return _finish_subpaths(subpaths)
 
 
 def detect_smooth(sp):

@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen, QTransform)
 from PySide6.QtWidgets import QInputDialog, QWidget
 
-from .model import Sheet
-from .render import render_document
+from . import model
+from .model import Sheet, a_to_t, walk
+from .render import draw_node, render_document
+from .model import arrow_length
+from .hitindex import HitIndex
+from . import scenecache
+from .scenecache import SceneCache
 from .snap import EdgeIndex, SnapIndex
+
+LIVE_LAYER_MIN = 300     # dragging more vectors than this moves a bitmap of them instead of redrawing each
 
 BG = QColor(58, 58, 60)
 SEL_COLOR = QColor(0, 140, 255)
@@ -68,8 +75,19 @@ class Canvas(QWidget):
         self.guides = []  # [("x", value) | ("y", value)]
         self.text_defaults = {"family": "DejaVu Sans", "size": 24.0, "bold": False, "italic": False}
         self._doc_rev = 0
+        self.scene = SceneCache(self)         # picture of everything that is not being dragged
+        self.live_scene = SceneCache(self)    # picture of the vectors being dragged (large drags only)
+        self.live = None
+        self._linger = None
+        self._live_token = 0
+        self._paint_rev = 0
+        self._last_key = None
+        self._idx_timer = QTimer(self)
+        self._idx_timer.setSingleShot(True)
+        self._idx_timer.timeout.connect(self._prebuild_indexes)
         self._snap_cache = None
         self._edge_cache = None
+        self._hit_cache = None
         self._space = False
         self._pan = None
         self._tmp_tool = None
@@ -86,8 +104,14 @@ class Canvas(QWidget):
                     sig.disconnect(slot)
                 except (RuntimeError, TypeError):
                     pass
+        self.end_live(patch=False)
+        self._linger = None
+        self.scene.invalidate()
+        self.scene.reset_stats()
+        self.live_scene.invalidate()
         self.doc = doc
         doc.contentChanged.connect(self._on_content)
+        doc.warmed.connect(lambda: self._idx_timer.start(250))
         doc.selectionChanged.connect(self.update)
         doc.restored.connect(self._on_restored)
         self._doc_rev += 1
@@ -95,14 +119,20 @@ class Canvas(QWidget):
         if self.tool:
             self.tool.reset()
         self._fitted = False
+        doc.schedule_warmup(200)
         self.update()
 
     def _on_content(self):
         self._doc_rev += 1
+        if self.live is not None and self.live.get("auto"):
+            self.end_live()
+        self.doc.schedule_warmup(700)
         self.update()
 
     def _on_restored(self):
         self._doc_rev += 1
+        self.end_live(patch=False)
+        self._linger = None
         self.hover = None
         if self.tool:
             self.tool.reset()
@@ -116,6 +146,8 @@ class Canvas(QWidget):
             return
         if self.tool is not None:
             self.tool.deactivate()
+        if self.live is not None:
+            self.end_live()
         self.tool = self.tools[name]
         self.tool.activate()
         self.guides = []
@@ -217,11 +249,7 @@ class Canvas(QWidget):
             p.drawRect(QRectF(tl[0] + 4, tl[1] + 4, w, h))
             p.setBrush(QColor(255, 255, 255))
             p.drawRect(QRectF(tl[0], tl[1], w, h))
-        p.save()
-        p.setTransform(vt)
-        p.setClipRect(self.view_rect_doc().adjusted(-2, -2, 2, 2))
-        render_document(p, self.doc, cull=self.view_rect_doc())
-        p.restore()
+        self._paint_scene(p, vt)
         p.setRenderHint(QPainter.Antialiasing, True)
         self._paint_sheet_frames(p, cur)
         self._paint_selection(p, vt)
@@ -230,6 +258,200 @@ class Canvas(QWidget):
             self.tool.paint(p)
         self._paint_marker(p)
         p.end()
+
+    def _live_key(self):
+        lv = self.live
+        return (self._doc_rev, model.EPOCH, lv["token"] if lv is not None else 0)
+
+    def _auto_live(self, touched, boxes, over):
+        """A tool is editing a few vectors without telling us (node editing, pen preview ...): on a
+        heavy drawing, take them out of the cached picture and draw them live on top of it."""
+        if over or self.scene.render_ms < 8.0 or not touched or self._doc_rev != self._paint_rev:
+            return
+        lv = self.live
+        if lv is not None:
+            if not lv.get("auto"):
+                return
+            fresh = [n for n in touched if n.id not in lv["ids"]]
+            if not fresh:
+                return
+            nodes = lv["nodes"] + fresh
+        else:
+            if self.scene.pix is None:
+                return
+            nodes = list(touched)
+        count = 0
+        for n in nodes:
+            count += sum(1 for m in walk(n, True) if not m.is_group())
+            if count > LIVE_LAYER_MIN:
+                return
+        # the cached picture is still right except for the touched vectors: their old boxes tell us where
+        # to patch (vectors that did not exist before, e.g. a path being drawn, have none)
+        old_key = None
+        lk = self._last_key
+        if lv is None and lk is not None and lk[0] == self._doc_rev and lk[2] == 0 and self.scene.fresh_for(lk):
+            old_key = lk            # the picture matched the document at the last paint: only `touched` changed
+        self.begin_live(nodes, old_key=old_key, extra_boxes=boxes)
+        self.live["auto"] = True
+
+    def _paint_direct(self, p, vt):
+        p.save()
+        p.setTransform(vt)
+        p.setClipRect(self.view_rect_doc().adjusted(-2, -2, 2, 2))
+        render_document(p, self.doc, cull=self.view_rect_doc())
+        p.restore()
+
+    def _paint_scene(self, p, vt):
+        if not scenecache.ENABLED:
+            self._paint_direct(p, vt)
+            return
+        touched, boxes, over = model.take_touched()
+        if touched or over:
+            self._auto_live(touched, boxes, over)
+        self._paint_rev = self._doc_rev
+        live = self.live
+        key = self._live_key()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        self.scene.paint(p, key, skip=live["set"] if live is not None else None)
+        self._last_key = key if self.scene.shows(key) else None
+        lv = live or self._linger
+        if lv is None:
+            return
+        if live is None and self.scene.shows(key):
+            self._drop_linger()
+            return
+        if lv["layer"]:
+            m = lv["matrix"]
+            vm = None
+            if m is not None:
+                inv, ok = vt.inverted()
+                vm = inv * a_to_t(m) * vt if ok else None
+            self.live_scene.paint(p, ("live", lv["token"]), only=lv["set"], matrix=vm)
+            return
+        p.save()
+        p.setTransform(vt)
+        p.setClipRect(self.view_rect_doc().adjusted(-2, -2, 2, 2))
+        for n, op in lv["leaves"]:
+            draw_node(p, n, op)
+        p.restore()
+
+    def _drop_linger(self):
+        self._linger = None
+        self.live_scene.invalidate()
+        self.update()
+
+    # ------------------------------------------------------------ live drags
+    def _region_of(self, leaves):
+        """Document rectangle that contains ``leaves`` (strokes, arrow heads and anti-aliasing included)."""
+        r = QRectF()
+        for n in leaves:
+            b = n.bounds()
+            pad = 2.0
+            st = getattr(n, "style", None)
+            if st is not None:
+                pad += st.width * 2 + arrow_length(st)
+            if n.kind == "measure":
+                pad += 20.0
+            r = r.united(b.adjusted(-pad, -pad, pad, pad))
+        e = 3.0 / self.zoom
+        return r.adjusted(-e, -e, e, e)
+
+    @staticmethod
+    def _shown(n):
+        """Is this vector drawn at all (itself and every folder above it visible)?"""
+        while n is not None:
+            if not n.visible:
+                return False
+            n = n.parent
+        return True
+
+    def begin_live(self, nodes, old_key=None, extra_boxes=()):
+        """Called by a tool when it starts moving / scaling / rotating ``nodes``. Returns True when
+        the nodes will NOT be modified until :meth:`end_live` (the tool then only reports the
+        matrix with :meth:`set_live_matrix` and applies it at the end) and False when it must
+        transform them every frame."""
+        self.end_live()
+        if self._linger is not None:
+            self._drop_linger()
+        leaves = []
+        ids = set()
+        for n in nodes:
+            for m in walk(n, True):
+                ids.add(m.id)
+                if not m.is_group():
+                    leaves.append(m)
+        lset = set(leaves)
+        self._live_token += 1
+        layer = len(leaves) > LIVE_LAYER_MIN
+        order = []
+        if not layer:
+            for n in walk(self.doc.root):
+                if n in lset:
+                    op = 1.0
+                    for a in n.ancestors():
+                        op *= a.opacity
+                    order.append((n, op * n.opacity))
+        if old_key is None:
+            old_key = self._live_key()
+        self.live = {"set": lset, "leaves": order, "layer": layer, "matrix": None, "token": self._live_token,
+                     "nodes": list(nodes), "ids": ids, "leaf_list": leaves}
+        model.set_live_ids(ids)
+        self.live["epoch"] = model.EPOCH
+        new_key = self._live_key()
+        self.live["scene_key"] = new_key
+        if self.width() > 0 and self.isVisible():
+            fresh = self.scene.fresh_for(old_key)
+            # On a heavy drawing never stall the start of a drag: whatever can't be prepared in a few
+            # milliseconds is rendered in slices while the drag already runs.
+            heavy = self.scene.render_ms > 120.0
+            if layer:
+                everything = fresh and all(n in lset or not self._shown(n) for n in walk(self.doc.root)
+                                           if not n.is_group())
+                if everything:
+                    self.live_scene.adopt(self.scene, ("live", self._live_token))   # the live layer IS the picture
+                elif not heavy:
+                    self.live_scene.prime(("live", self._live_token), only=lset)
+            region = self._region_of(leaves)
+            if extra_boxes:
+                pad = 2.0 + 3.0 / self.zoom + 2.0 * max((getattr(n, "style", None).width for n in leaves
+                                                         if getattr(n, "style", None) is not None), default=0.0)
+                for l, t, r, b in extra_boxes:
+                    region = region.united(QRectF(l - pad, t - pad, r - l + 2 * pad, b - t + 2 * pad))
+            vis = self.view_rect_doc()
+            covers = region.intersected(vis).width() * region.intersected(vis).height() > 0.5 * vis.width() * vis.height()
+            if fresh and not (heavy and covers) and self.scene.punch(region, new_key, skip=lset):
+                pass
+            elif not heavy:
+                self.scene.prime(new_key, skip=lset)
+        self.update()
+        return layer
+
+    def set_live_matrix(self, m):
+        """Document-space affine matrix currently applied to the dragged vectors (layer mode)."""
+        if self.live is not None:
+            self.live["matrix"] = m
+            self.update()
+
+    def end_live(self, patch=True):
+        """The drag is over (its result is already in the nodes). The cached picture is patched
+        where the vectors landed; if that is not possible and the scene is heavy, keep drawing the
+        dragged vectors on top of the old picture until the new one is ready."""
+        lv, self.live = self.live, None
+        if lv is None:
+            return
+        same = model.EPOCH == lv["epoch"]
+        model.set_live_ids(None)
+        key = self._live_key()
+        # a few vectors: repaint just the patch they cover. A huge selection would cost as much as a
+        # full render, so there the dragged bitmap stays on screen while the exact picture is redrawn.
+        if patch and same and not lv["layer"] and self.isVisible() and self.scene.fresh_for(lv["scene_key"]) and \
+                self.scene.punch(self._region_of(lv["leaf_list"]), key):
+            self.live_scene.invalidate()
+        elif patch and self.scene.render_ms >= 8.0 and self.isVisible():
+            self._linger = lv
+        else:
+            self.live_scene.invalidate()
+        self.update()
 
     def sheet_label_rect(self, sh, fm=None):
         """Clickable name tag above the top-left corner of a sheet (view coordinates)."""
@@ -333,37 +555,22 @@ class Canvas(QWidget):
             p.drawText(r, Qt.AlignCenter, label)
 
     # ------------------------------------------------------------ hit testing
+    def _prebuild_indexes(self):
+        """While the user is idle, build the picking / snapping indexes so the next click or drag
+        on a big drawing finds them ready."""
+        if self.live is not None or self.doc is None or not self.isVisible():
+            return
+        self.hit_index()
+        self._index(())
+
+    def hit_index(self):
+        key = (self._doc_rev, model.EPOCH)
+        if self._hit_cache is None or self._hit_cache[0] != key:
+            self._hit_cache = (key, HitIndex(self.doc))
+        return self._hit_cache[1]
+
     def hit_test(self, p, tol_px=4.0, level=None, accept=None):
-        tol = tol_px / self.zoom
-        rect = QRectF(p[0] - tol, p[1] - tol, 2 * tol, 2 * tol)
-        pt = QPointF(*p)
-
-        def rec(node):
-            if not node.visible or node.locked:
-                return None
-            if node.clip:
-                cp = node.clip_path()
-                if cp is not None and not cp.contains(pt):
-                    return None
-            if node.is_group():
-                for c in reversed(node.children):
-                    r = rec(c)
-                    if r is not None:
-                        return r
-                return None
-            st = getattr(node, "style", None)
-            pad = tol + (st.width if st is not None else 0.0) + 2.0
-            if not node.bounds().adjusted(-pad, -pad, pad, pad).contains(pt):
-                return None
-            if accept is not None and not accept(node):
-                return None
-            return node if node.shape_path().intersects(rect) else None
-
-        hit = None
-        for c in reversed(self.doc.root.children):
-            hit = rec(c)
-            if hit is not None:
-                break
+        hit = self.hit_index().hit(p, tol_px / self.zoom, accept)
         if hit is None:
             return None
         level = level or self.select_level
@@ -380,45 +587,32 @@ class Canvas(QWidget):
         return n
 
     def nodes_in_rect(self, rect: QRectF, level=None):
-        out = []
-
-        def rec(node):
-            if not node.visible or node.locked:
-                return
-            if node.is_group():
-                for c in node.children:
-                    rec(c)
-                return
-            # padded: a perfectly horizontal / vertical line has an empty bounding box (rect.intersects is False)
-            if rect.intersects(node.bounds().adjusted(-1, -1, 1, 1)) and node.shape_path().intersects(rect):
-                out.append(node)
-
-        for c in self.doc.root.children:
-            rec(c)
+        out = self.hit_index().in_rect(rect)
         level = level or self.select_level
         if level == "folder":
-            res = []
+            res, seen = [], set()
             for n in out:
                 n = self._folder_level(n)
-                if n not in res:
+                if id(n) not in seen:
+                    seen.add(id(n))
                     res.append(n)
             return res
         return out
 
     # ------------------------------------------------------------ snapping
     def _index(self, exclude):
-        key = (self._doc_rev, tuple(sorted(id(n) for n in exclude)), round(self.zoom, 4),
-               round(self.origin.x()), round(self.origin.y()))
+        key = (self._doc_rev, model.EPOCH)
         if self._snap_cache is None or self._snap_cache[0] != key:
-            self._snap_cache = (key, SnapIndex(self.doc, exclude, self.view_rect_doc()))
-        return self._snap_cache[1]
+            self._snap_cache = (key, SnapIndex(self.doc))
+        return self._snap_cache[1].view(exclude)
 
     def _edges(self, exclude):
-        key = (self._doc_rev, tuple(sorted(id(n) for n in exclude)), round(self.zoom, 4),
-               round(self.origin.x()), round(self.origin.y()))
+        key = (self._doc_rev, model.EPOCH)
         if self._edge_cache is None or self._edge_cache[0] != key:
-            self._edge_cache = (key, EdgeIndex(self.doc, exclude, self.view_rect_doc()))
-        return self._edge_cache[1]
+            self._edge_cache = (key, EdgeIndex(self.doc))
+        idx = self._edge_cache[1]
+        idx.set_exclude(exclude)
+        return idx
 
     def clear_snap(self):
         self.guides = []
@@ -560,6 +754,8 @@ class Canvas(QWidget):
             return
         if self.tool is not None:
             self.tool.release(Ev(self, e))
+        if self.live is not None and self.live.get("auto"):
+            self.end_live()
         self.update()
 
     def mouseDoubleClickEvent(self, e):

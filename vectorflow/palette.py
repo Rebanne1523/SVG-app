@@ -148,16 +148,33 @@ class PaletteBar:
         return ch
 
     def refresh(self, *a):
-        ls = self._leaves()
-        if not ls:
+        sel = self.doc.selection
+        first = None
+        if sel:
+            has_fill = has_stroke = False
+            seen = 0
+            for top in sel:
+                for n in (leaves(top) if top.is_group() else (top,)):
+                    if first is None:
+                        first = n
+                    st = getattr(n, "style", None)
+                    if n.kind == "measure":
+                        has_stroke = True
+                    elif st is not None:
+                        has_fill = has_fill or bool(st.fill)
+                        has_stroke = has_stroke or bool(st.stroke and st.width > 0)
+                    seen += 1
+                    if (has_fill and has_stroke) or seen > 2000:     # decided (or a huge selection: sample it)
+                        break
+                else:
+                    continue
+                break
+        if first is None:
             ds = self.doc.default_style
             show = ["fill"] if ds.fill and not ds.stroke else ["stroke"]
             cur = {"fill": ds.fill, "stroke": ds.stroke}
         else:
-            chans = [self._channels(n) for n in ls]
-            both = any(len(c) == 2 for c in chans) or (any("fill" in c for c in chans) and any("stroke" in c for c in chans))
-            show = ["fill", "stroke"] if both else (["fill"] if any("fill" in c for c in chans) else ["stroke"])
-            first = ls[0]
+            show = ["fill", "stroke"] if (has_fill and has_stroke) else (["fill"] if has_fill else ["stroke"])
             st = getattr(first, "style", None)
             cur = {"fill": st.fill if st else None, "stroke": st.stroke if st else None}
         for ch, (row, chip, strip) in self.rows.items():

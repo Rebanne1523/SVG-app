@@ -7,7 +7,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 
 from .geometry import bez_tangent, dist, flatten_cubic
-from .model import arrow_length, arrow_path, qcolor
+from .model import arrow_length, arrow_path, box4, qcolor
 
 
 def trim_polyline(pts, start_trim, end_trim):
@@ -125,35 +125,47 @@ def _draw_arrows(painter, arrows, st):
             painter.strokePath(ap, pen)
 
 
-def draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None):
-    if not node.visible:
-        return
-    if skip and node in skip:
-        return
-    if cull is not None and not node.is_group():
-        pad = 2.0
-        st = getattr(node, "style", None)
-        if st is not None:
-            pad += st.width * 2 + arrow_length(st)
-        if node.kind == "measure":
-            pad += 20.0
-        if not cull.intersects(node.bounds().adjusted(-pad, -pad, pad, pad)):
-            return
-    opacity = parent_opacity * node.opacity
-    clip = node.clip_path() if node.clip else None
-    if clip is not None:
-        painter.save()
-        painter.setClipPath(clip, Qt.IntersectClip)
+_BRUSHES: dict = {}
+
+
+def brush_of(c):
+    c = tuple(c)
+    b = _BRUSHES.get(c)
+    if b is None:
+        if len(_BRUSHES) > 4096:
+            _BRUSHES.clear()
+        b = _BRUSHES[c] = QBrush(qcolor(c))
+    return b
+
+
+def _culled(node, cull, min_size):
+    """True when a leaf lies outside ``cull`` or is too small to be seen (``min_size`` in document units)."""
+    pad = 2.0
+    st = getattr(node, "style", None)
+    if st is not None:
+        pad += st.width * 2 + arrow_length(st)
     kind = node.kind
-    if kind == "group":
-        for c in node.children:
-            draw_node(painter, c, opacity, skip, cull)
-    elif kind == "path":
+    if kind == "measure":
+        pad += 20.0
+    l, t, r, b = box4(node)
+    if cull is not None and (r + pad < cull.left() or l - pad > cull.right() or
+                             b + pad < cull.top() or t - pad > cull.bottom()):
+        return True
+    if min_size > 0.0 and kind != "measure" and kind != "image":
+        w = st.width if st is not None and st.stroke else 0.0
+        if r - l + w < min_size and b - t + w < min_size:
+            return True
+    return False
+
+
+def _draw_leaf(painter, node, opacity):
+    kind = node.kind
+    if kind == "path":
         painter.setOpacity(opacity)
         st = node.style
         path = node.qpath()
         if st.fill:
-            painter.fillPath(path, QBrush(qcolor(st.fill)))
+            painter.fillPath(path, brush_of(st.fill))
         if st.stroke and st.width > 0:
             if has_arrows(node):
                 stroke, arrows = path_with_arrows(node)
@@ -166,7 +178,7 @@ def draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None)
         st = node.style
         path = node.qpath()
         if st.fill:
-            painter.fillPath(path, QBrush(qcolor(st.fill)))
+            painter.fillPath(path, brush_of(st.fill))
         if st.stroke and st.width > 0:
             painter.strokePath(path, st.pen())
     elif kind == "image":
@@ -180,17 +192,76 @@ def draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None)
         if st.stroke and st.width > 0:
             painter.strokePath(line, st.pen())
             _draw_arrows(painter, shapes, st)
-        painter.fillPath(node.text_path(), QBrush(qcolor(node.text_color)))
+        painter.fillPath(node.text_path(), brush_of(node.text_color))
+
+
+def draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None, min_size=0.0):
+    if not node.visible:
+        return
+    if skip and node in skip:
+        return
+    leaf = not node.is_group()
+    if leaf and (cull is not None or min_size > 0.0) and _culled(node, cull, min_size):
+        return
+    opacity = parent_opacity * node.opacity
+    clip = node.clip_path() if node.clip else None
+    if clip is not None:
+        painter.save()
+        painter.setClipPath(clip, Qt.IntersectClip)
+    if not leaf:
+        for c in node.children:
+            draw_node(painter, c, opacity, skip, cull, min_size)
+    else:
+        _draw_leaf(painter, node, opacity)
     if clip is not None:
         painter.restore()
     painter.setOpacity(parent_opacity)
 
 
-def render_document(painter: QPainter, doc, skip=None, cull=None):
+def iter_draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None, min_size=0.0, only=None):
+    """Generator twin of :func:`draw_node`: yields after every painted leaf so the caller can
+    time-slice a big drawing across event-loop turns. ``only`` (a set of nodes) restricts the
+    painting to those leaves."""
+    if not node.visible:
+        return
+    if skip and node in skip:
+        return
+    leaf = not node.is_group()
+    if leaf:
+        if only is not None and node not in only:
+            return
+        if (cull is not None or min_size > 0.0) and _culled(node, cull, min_size):
+            yield          # skipped, but let the caller check its time budget (building bounds can be slow)
+            return
+    opacity = parent_opacity * node.opacity
+    clip = node.clip_path() if node.clip else None
+    if clip is not None:
+        painter.save()
+        painter.setClipPath(clip, Qt.IntersectClip)
+    if not leaf:
+        for c in node.children:
+            yield from iter_draw_node(painter, c, opacity, skip, cull, min_size, only)
+    else:
+        _draw_leaf(painter, node, opacity)
+        yield
+    if clip is not None:
+        painter.restore()
+    painter.setOpacity(parent_opacity)
+
+
+def render_document(painter: QPainter, doc, skip=None, cull=None, min_size=0.0):
     painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setRenderHint(QPainter.TextAntialiasing, True)
     for c in doc.root.children:
-        draw_node(painter, c, 1.0, skip, cull)
+        draw_node(painter, c, 1.0, skip, cull, min_size)
+    painter.setOpacity(1.0)
+
+
+def iter_render_document(painter: QPainter, doc, skip=None, cull=None, min_size=0.0, only=None):
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+    for c in doc.root.children:
+        yield from iter_draw_node(painter, c, 1.0, skip, cull, min_size, only)
     painter.setOpacity(1.0)
 
 

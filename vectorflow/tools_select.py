@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QWidget
 
-from . import affine
+from . import affine, model
 from .geometry import (bez, constrain_angle_projected, dist, nearest_on_polyline, split_cubic)
-from .model import Anchor, fresh_copy, leaves
+from .model import Anchor, a_to_t, fresh_copy, leaves
 from .tools_base import Tool, rotate_cursor
 
 SEL = QColor(0, 140, 255)
@@ -65,9 +66,10 @@ class SelectTool(Tool):
         self.marquee = None
         self.angle_readout = None
         self.pending_toggle = None
+        self.layer = False          # big drag: nodes stay untouched until release (see Canvas.begin_live)
+        self._pending = None
+        self._sr_cache = None
         self.canvas.hover = None
-        if self.doc is not None:
-            pass
 
     def cursor(self):
         return QCursor(Qt.ArrowCursor)
@@ -96,10 +98,14 @@ class SelectTool(Tool):
         sel = self.doc.selection
         if not sel:
             return None
-        r = self.doc.bounds_of(sel)
-        if r.isNull() and r.width() == 0 and r.height() == 0 and not sel:
-            return None
-        return r
+        if len(sel) > 40 and self.canvas.live is None:
+            key = (self.canvas._doc_rev, model.EPOCH, len(sel), hash(tuple(map(id, sel))))
+            if self._sr_cache is not None and self._sr_cache[0] == key:
+                return self._sr_cache[1]
+            r = self.doc.bounds_of(sel)
+            self._sr_cache = (key, r)
+            return r
+        return self.doc.bounds_of(sel)
 
     def _view_rect(self, r):
         a = self.canvas.to_view((r.left(), r.top()))
@@ -176,8 +182,9 @@ class SelectTool(Tool):
             self.marquee = QRectF(QPointF(*ev.p), QPointF(*ev.p))
 
     def _begin_transform(self):
-        self.doc.begin_edit()
-        self.orig = {n: n.get_geom() for n in self.nodes}
+        # the undo snapshot and the saved geometry are taken when the drag really starts (see move),
+        # not on a plain click: with thousands of vectors selected that would stall every click
+        self.orig = {}
         self.orig_rect = QRectF(self.doc.bounds_of(self.nodes))
         self.dragging = False
         self.copy_on_drag = False
@@ -186,6 +193,38 @@ class SelectTool(Tool):
     def _restore(self):
         for n, g in self.orig.items():
             n.set_geom(g)
+
+    _NO_ARG = object()
+
+    def _apply(self, m, strokes=_NO_ARG):
+        """Show the transform ``m`` of the original geometry. Large drags only report the matrix to
+        the canvas (which moves a bitmap) and apply it for real on release."""
+        if self.layer:
+            self._pending = (m, strokes)
+            self.canvas.set_live_matrix(m)
+            return
+        for n in self.nodes:
+            n.set_geom(self.orig[n])
+            if strokes is self._NO_ARG:
+                n.transform(m)
+            else:
+                n.transform(m, strokes)
+
+    def _apply_live(self):
+        """Large drag: the nodes were left untouched while dragging; apply the final transform now."""
+        if self.layer and self._pending is not None:
+            m, strokes = self._pending
+            for n in self.nodes:
+                if strokes is self._NO_ARG:
+                    n.transform(m)
+                else:
+                    n.transform(m, strokes)
+            self._pending = None
+
+    def _end_live(self):
+        self.layer = False
+        self._pending = None
+        self.canvas.end_live()
 
     def move(self, ev):
         if self.mode is None:
@@ -200,8 +239,15 @@ class SelectTool(Tool):
             if dist(ev.vp, self.start_v) < 3:
                 return
             self.dragging = True
+            if self.mode in ("move", "scale", "rotate"):
+                self.doc.begin_edit()
             if self.mode == "move" and self.copy_on_drag:
                 self._copy_selection()
+            if self.mode in ("move", "scale", "rotate"):
+                self.layer = self.canvas.begin_live(self.nodes)
+                self._pending = None
+                if not self.layer and not self.orig:
+                    self.orig = {n: n.get_geom() for n in self.nodes}
         if self.mode == "sheet":
             dx, dy = ev.x - self.start[0], ev.y - self.start[1]
             if ev.shift:
@@ -269,6 +315,8 @@ class SelectTool(Tool):
                     (r.center().x(), r.center().y())]
             count = 0
             for n in self._exclude:
+                if count >= 120:
+                    break
                 if n.kind == "path":
                     for sp in n.subpaths:
                         for a in sp.anchors:
@@ -280,10 +328,7 @@ class SelectTool(Tool):
                                            ys=(r.top(), r.center().y(), r.bottom()))
         else:
             self.canvas.clear_snap()
-        m = affine.translate(dx, dy)
-        for n in self.nodes:
-            n.set_geom(self.orig[n])
-            n.transform(m)
+        self._apply(affine.translate(dx, dy))
         self.say(f"Move  Δx {dx:.2f}  Δy {dy:.2f}")
 
     def _handle_point(self, r, i):
@@ -326,9 +371,7 @@ class SelectTool(Tool):
         sx = sx if abs(sx) > 1e-3 else math.copysign(1e-3, sx or 1.0)
         sy = sy if abs(sy) > 1e-3 else math.copysign(1e-3, sy or 1.0)
         m = (sx, 0.0, 0.0, sy, ax * (1 - sx), ay * (1 - sy))
-        for n in self.nodes:
-            n.set_geom(self.orig[n])
-            n.transform(m, self.canvas.scale_strokes)
+        self._apply(m, self.canvas.scale_strokes)
         self.say(f"Scale  {sx * 100:.1f}% × {sy * 100:.1f}%")
 
     def _do_rotate(self, ev):
@@ -340,10 +383,7 @@ class SelectTool(Tool):
         nearest = round(d / 15.0) * 15.0
         if ev.shift or abs(d - nearest) < 2.5:
             d = nearest
-        m = affine.rotate(d, c[0], c[1])
-        for n in self.nodes:
-            n.set_geom(self.orig[n])
-            n.transform(m)
+        self._apply(affine.rotate(d, c[0], c[1]))
         self.angle_readout = (ev.vp, d)
         self.say(f"Rotate  {d:.1f}°")
 
@@ -381,11 +421,14 @@ class SelectTool(Tool):
             struct = getattr(self, "_structure_changed", False)
             self._structure_changed = False
             if changed:
+                self._apply_live()
                 if mode == "move" and self.doc.reassign_to_sheets(self.nodes):
                     struct = True      # dropped onto another sheet -> it now belongs to that sheet
                 self.doc.end_edit(True, structure=struct)
                 self.doc.set_selection(self.doc.selection)
+                self._end_live()
             else:
+                self._end_live()
                 self.doc.cancel_edit()
             self.mode = None
             self.angle_readout = None
@@ -417,6 +460,7 @@ class SelectTool(Tool):
         if key == Qt.Key_Escape and self.mode in ("move", "scale", "rotate", "sheet"):
             self._restore()
             self.doc.cancel_edit()
+            self._end_live()
             self.mode = None
             self.canvas.clear_snap()
             return True
@@ -437,7 +481,9 @@ class SelectTool(Tool):
         r = self.sel_rect()
         if r is None:
             return
-        if self.mode in ("move",) and self.dragging:
+        if self.layer and self._pending is not None and self.orig_rect is not None:
+            r = a_to_t(self._pending[0]).mapRect(self.orig_rect)
+        elif self.mode in ("move",) and self.dragging:
             r = self.doc.bounds_of(self.doc.selection)
         vr = self._view_rect(r)
         pen = QPen(SEL)
@@ -460,6 +506,49 @@ class SelectTool(Tool):
             p.drawRoundedRect(rr, 3, 3)
             p.setPen(QColor(255, 255, 255))
             p.drawText(rr, Qt.AlignCenter, text)
+
+
+MARKER_CAP = 600          # anchors drawn at once by the Direct tool (the rest only near the cursor)
+
+
+class AnchorTable:
+    """Numpy view of every anchor of a path node (cached on the node, dropped on touch())."""
+    __slots__ = ("flat", "loc", "X", "Y", "IX", "IY", "OX", "OY", "nxt", "_pos")
+
+    def __init__(self, node):
+        flat, loc, nxt = [], [], []
+        base = 0
+        for sp in node.subpaths:
+            cnt = len(sp.anchors)
+            for i, a in enumerate(sp.anchors):
+                flat.append((sp, a))
+                loc.append(i)
+                nxt.append(base + i + 1 if i + 1 < cnt else (base if sp.closed and cnt > 1 else -1))
+            base += cnt
+        self.flat, self.loc = flat, loc
+        n = len(flat)
+        self.nxt = np.asarray(nxt, dtype=np.int64)
+        f = np.fromiter
+        self.X = f((a.x for _, a in flat), float, n)
+        self.Y = f((a.y for _, a in flat), float, n)
+        self.IX = f((a.ix for _, a in flat), float, n)
+        self.IY = f((a.iy for _, a in flat), float, n)
+        self.OX = f((a.ox for _, a in flat), float, n)
+        self.OY = f((a.oy for _, a in flat), float, n)
+        self._pos = None
+
+    def position_of(self, anchor):
+        """(index in the flat table) of an anchor object."""
+        if self._pos is None:
+            self._pos = {id(a): i for i, (_, a) in enumerate(self.flat)}
+        return self._pos.get(id(anchor))
+
+
+def anchor_table(node):
+    t = node.__dict__.get("_c_atab")
+    if t is None:
+        t = node.__dict__["_c_atab"] = AnchorTable(node)
+    return t
 
 
 # =============================================================================================
@@ -592,46 +681,69 @@ class DirectTool(Tool):
         return any(x is a for _, x in self.sel)
 
     def hit_anchor(self, vp):
+        c = self.canvas
+        z, o = c.zoom, c.origin
         best = None
         bd = 8.0
         for n in self.paths():
-            for sp in n.subpaths:
-                for a in sp.anchors:
-                    v = self.canvas.to_view(a.p)
-                    d = dist(v, vp)
-                    if d <= bd:
-                        bd, best = d, (n, sp, a)
+            t = anchor_table(n)
+            if not t.flat:
+                continue
+            d = np.hypot(t.X * z + o.x() - vp[0], t.Y * z + o.y() - vp[1])
+            k = int(np.argmin(d))
+            if d[k] <= bd:
+                bd = float(d[k])
+                sp, a = t.flat[k]
+                best = (n, sp, a)
         return best
 
-    def hit_handle(self, vp):
-        relevant = set()
+    def _near_selected(self):
+        """(node, subpath, anchor) for every selected anchor and its two neighbours."""
+        out, seen = [], set()
         for n, a in self.sel:
-            relevant.add(id(a))
-        for n in self.paths():
-            for sp in n.subpaths:
-                cnt = len(sp.anchors)
-                for i, a in enumerate(sp.anchors):
-                    near = id(a) in relevant
-                    if not near:
-                        for j in (i - 1, i + 1):
-                            if (0 <= j < cnt or sp.closed) and id(sp.anchors[j % cnt]) in relevant:
-                                near = True
-                    if not near:
-                        continue
-                    for which, has, pt in (("in", a.has_in(), a.hin), ("out", a.has_out(), a.hout)):
-                        if has and dist(self.canvas.to_view(pt), vp) <= 7:
-                            return (n, sp, a, which)
+            t = anchor_table(n)
+            k = t.position_of(a)
+            if k is None:
+                continue
+            sp = t.flat[k][0]
+            i = t.loc[k]
+            cnt = len(sp.anchors)
+            for j in (i - 1, i, i + 1):
+                if 0 <= j < cnt or (sp.closed and cnt):
+                    b = sp.anchors[j % cnt]
+                    if id(b) not in seen:
+                        seen.add(id(b))
+                        out.append((n, sp, b))
+        return out
+
+    def hit_handle(self, vp):
+        if not self.sel:
+            return None
+        for n, sp, a in self._near_selected():
+            for which, has, pt in (("in", a.has_in(), a.hin), ("out", a.has_out(), a.hout)):
+                if has and dist(self.canvas.to_view(pt), vp) <= 7:
+                    return (n, sp, a, which)
         return None
 
     def hit_segment(self, p):
         tol = 6.0 / self.canvas.zoom
         best = None
         for n in self.paths():
-            for sp in n.subpaths:
-                for i, a0, a1 in sp.segments():
-                    d, t = segment_hit(a0, a1, p)
-                    if d <= tol and (best is None or d < best[0]):
-                        best = (d, n, sp, i, t)
+            t = anchor_table(n)
+            idx = np.flatnonzero(t.nxt >= 0)
+            if idx.size == 0:
+                continue
+            nx = t.nxt[idx]
+            xs = np.stack([t.X[idx], t.OX[idx], t.IX[nx], t.X[nx]])
+            ys = np.stack([t.Y[idx], t.OY[idx], t.IY[nx], t.Y[nx]])
+            near = ((xs.min(0) - tol <= p[0]) & (xs.max(0) + tol >= p[0]) &
+                    (ys.min(0) - tol <= p[1]) & (ys.max(0) + tol >= p[1]))
+            for k in idx[near]:
+                sp, a0 = t.flat[k]
+                a1 = t.flat[int(t.nxt[k])][1]
+                d, tt = segment_hit(a0, a1, p)
+                if d <= tol and (best is None or d < best[0]):
+                    best = (d, n, sp, t.loc[k], tt)
         return best
 
     # --------------------------------------------------------------- events
@@ -935,35 +1047,48 @@ class DirectTool(Tool):
             p.setBrush(QColor(0, 140, 255, 30))
             p.drawRect(QRectF(QPointF(*a), QPointF(*b)))
         sel_ids = {id(a) for _, a in self.sel}
+        handle_pen = QPen(SEL)
+        handle_pen.setWidthF(1.0)
+        white = QColor(255, 255, 255)
+        p.setPen(handle_pen)
+        for n, sp, a in self._near_selected():
+            v = c.to_view(a.p)
+            for has, pt in ((a.has_in(), a.hin), (a.has_out(), a.hout)):
+                if has:
+                    hv = c.to_view(pt)
+                    p.setPen(handle_pen)
+                    p.drawLine(QPointF(*v), QPointF(*hv))
+                    p.setBrush(white)
+                    p.drawEllipse(QPointF(*hv), 3.5, 3.5)
+        marker_pen = QPen(SEL)
+        marker_pen.setWidthF(1.2)
+        p.setPen(marker_pen)
+        z, o = c.zoom, c.origin
+        W, H = c.width(), c.height()
+        cursor = c.to_view(c.last_mouse) if c.last_mouse is not None else None
         for n in self.paths():
-            for sp in n.subpaths:
-                cnt = len(sp.anchors)
-                for i, a in enumerate(sp.anchors):
-                    show = id(a) in sel_ids
-                    if not show:
-                        for j in (i - 1, i + 1):
-                            if (0 <= j < cnt or sp.closed) and id(sp.anchors[j % cnt]) in sel_ids:
-                                show = True
-                    if show:
-                        v = c.to_view(a.p)
-                        pen = QPen(SEL)
-                        pen.setWidthF(1.0)
-                        p.setPen(pen)
-                        for has, pt in ((a.has_in(), a.hin), (a.has_out(), a.hout)):
-                            if has:
-                                hv = c.to_view(pt)
-                                p.drawLine(QPointF(*v), QPointF(*hv))
-                                p.setBrush(QColor(255, 255, 255))
-                                p.drawEllipse(QPointF(*hv), 3.5, 3.5)
-                for a in sp.anchors:
-                    v = c.to_view(a.p)
-                    selected = id(a) in sel_ids
-                    pen = QPen(SEL)
-                    pen.setWidthF(1.2)
-                    p.setPen(pen)
-                    p.setBrush(SEL if selected else QColor(255, 255, 255))
-                    r = QRectF(v[0] - 3.5, v[1] - 3.5, 7, 7)
-                    if a.smooth:
-                        p.drawEllipse(r)
-                    else:
-                        p.drawRect(r)
+            t = anchor_table(n)
+            if not t.flat:
+                continue
+            vx, vy = t.X * z + o.x(), t.Y * z + o.y()
+            show = (vx >= -8) & (vx <= W + 8) & (vy >= -8) & (vy <= H + 8)
+            idx = np.flatnonzero(show)
+            if idx.size > MARKER_CAP:
+                # far too many to draw (or to use): keep the ones around the cursor and the selected ones
+                keep = np.zeros(len(t.flat), dtype=bool)
+                if cursor is not None:
+                    keep = np.hypot(vx - cursor[0], vy - cursor[1]) <= 90
+                for _, a in self.sel:
+                    k = t.position_of(a)
+                    if k is not None:
+                        keep[k] = True
+                idx = np.flatnonzero(show & keep)[:MARKER_CAP]
+            for k in idx:
+                a = t.flat[k][1]
+                selected = id(a) in sel_ids
+                p.setBrush(SEL if selected else white)
+                r = QRectF(vx[k] - 3.5, vy[k] - 3.5, 7, 7)
+                if a.smooth:
+                    p.drawEllipse(r)
+                else:
+                    p.drawRect(r)

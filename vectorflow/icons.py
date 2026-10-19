@@ -279,7 +279,7 @@ def swatch_icon(fill, stroke, size=16):
     if key in _sw_cache:
         return _sw_cache[key]
     ic = _swatch_icon(fill, stroke, size)
-    if len(_sw_cache) < 2000:
+    if len(_sw_cache) < 6000:
         _sw_cache[key] = ic
     return ic
 

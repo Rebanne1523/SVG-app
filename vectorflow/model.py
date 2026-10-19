@@ -8,7 +8,7 @@ import sys
 import time
 from contextlib import contextmanager
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QPainterPath,
                            QPainterPathStroker, QPolygonF, QTransform)
 
@@ -31,6 +31,30 @@ DASH_PRESETS = {
 ARROW_TYPES = ["none", "triangle", "open", "circle", "square", "diamond"]
 CAPS = ["butt", "round", "square"]
 JOINS = ["miter", "round", "bevel"]
+
+
+import os as _os
+_CHECK_SNAPSHOTS = bool(_os.environ.get("VF_CHECK_SNAPSHOTS"))
+EPOCH = 0            # bumped whenever any node changes (see Node.touch)
+LIVE_IDS = None      # ids of the nodes being dragged right now: their changes don't bump EPOCH
+TOUCHED: set = set()            # nodes modified since the canvas last asked (see take_touched)
+TOUCHED_BOXES: list = []        # where those nodes were before (l, t, r, b), when known
+TOUCHED_OVERFLOW = [False]
+
+
+def take_touched():
+    """(nodes touched since the previous call, their previous boxes, True if too many to list)."""
+    global TOUCHED, TOUCHED_BOXES
+    t, TOUCHED = TOUCHED, set()
+    boxes, TOUCHED_BOXES = TOUCHED_BOXES, []
+    over, TOUCHED_OVERFLOW[0] = TOUCHED_OVERFLOW[0], False
+    return t, boxes, over
+
+
+def set_live_ids(ids):
+    global LIVE_IDS, EPOCH
+    LIVE_IDS = ids
+    EPOCH += 1
 
 
 def qcolor(c: Color | None) -> QColor:
@@ -76,14 +100,23 @@ class Style:
         from PySide6.QtGui import QPen
         if not self.stroke or self.width <= 0:
             return QPen(Qt.NoPen)
-        pen = QPen(qcolor(self.stroke))
-        pen.setWidthF(self.width * scale_width)
-        pen.setCapStyle({"butt": Qt.FlatCap, "round": Qt.RoundCap, "square": Qt.SquareCap}[self.cap])
-        pen.setJoinStyle({"miter": Qt.MiterJoin, "round": Qt.RoundJoin, "bevel": Qt.BevelJoin}[self.join])
-        pen.setMiterLimit(4.0)
-        if self.dash:
-            pen.setDashPattern(list(self.dash))
-        return pen
+        key = (self.stroke, self.width * scale_width, self.cap, self.join, tuple(self.dash))
+        base = _PEN_CACHE.get(key)
+        if base is None:
+            base = QPen(qcolor(self.stroke))
+            base.setWidthF(self.width * scale_width)
+            base.setCapStyle({"butt": Qt.FlatCap, "round": Qt.RoundCap, "square": Qt.SquareCap}[self.cap])
+            base.setJoinStyle({"miter": Qt.MiterJoin, "round": Qt.RoundJoin, "bevel": Qt.BevelJoin}[self.join])
+            base.setMiterLimit(4.0)
+            if self.dash:
+                base.setDashPattern(list(self.dash))
+            if len(_PEN_CACHE) > 4096:
+                _PEN_CACHE.clear()
+            _PEN_CACHE[key] = base
+        return QPen(base)      # implicitly shared copy: callers may tweak it without touching the cache
+
+
+_PEN_CACHE: dict = {}
 
 
 def arrow_length(style: Style) -> float:
@@ -163,7 +196,9 @@ class Anchor:
         self.smooth = smooth
 
     def copy(self):
-        return Anchor(self.x, self.y, self.ix, self.iy, self.ox, self.oy, self.smooth)
+        c = Anchor.__new__(Anchor)
+        c.x, c.y, c.ix, c.iy, c.ox, c.oy, c.smooth = self.x, self.y, self.ix, self.iy, self.ox, self.oy, self.smooth
+        return c
 
     @property
     def p(self):
@@ -272,9 +307,24 @@ class Node:
         return {k: v for k, v in self.__dict__.items() if not k.startswith("_c_")}
 
     def touch(self):
+        global EPOCH
         self._rev += 1
-        for k in [k for k in self.__dict__ if k.startswith("_c_")]:
-            del self.__dict__[k]
+        d = self.__dict__
+        if LIVE_IDS is None or self.id not in LIVE_IDS:
+            EPOCH += 1          # lets the canvas know its cached picture is stale
+            if len(TOUCHED) < 1000:
+                TOUCHED.add(self)
+                c = d.get("_c_b4")
+                if c is None:
+                    b = d.get("_c_bounds")
+                    if b is not None:
+                        c = (b.left(), b.top(), b.right(), b.bottom())
+                if c is not None:
+                    TOUCHED_BOXES.append(c)
+            else:
+                TOUCHED_OVERFLOW[0] = True
+        for k in [k for k in d if k.startswith("_c_")]:
+            del d[k]
 
     def is_group(self):
         return False
@@ -294,6 +344,9 @@ class Node:
         return p
 
     # geometry protocol -------------------------------------------------
+    def touches(self, rect):
+        return self.shape_path().intersects(rect)
+
     def get_geom(self):
         raise NotImplementedError
 
@@ -499,6 +552,29 @@ class PathNode(Node):
                 sp = sp.united(stroker.createStroke(path))
             self._c_shape = sp
         return sp
+
+    def touches(self, rect):
+        """Does the visible shape (fill + stroke, or a hairline if invisible) meet ``rect``? Fill and
+        stroke outline are tested separately: building their union is the slow part of shape_path()."""
+        parts = self.__dict__.get("_c_parts")
+        if parts is None:
+            path = self.qpath()
+            st = self.style
+            parts = []
+            if st.fill:
+                parts.append(path)
+            hairline = not st.fill and not (st.stroke and st.width > 0)
+            if (st.stroke and st.width > 0) or hairline:
+                stroker = QPainterPathStroker()
+                stroker.setWidth(max(st.width, 0.001) if not hairline else 1.0)
+                stroker.setCapStyle({"butt": Qt.FlatCap, "round": Qt.RoundCap, "square": Qt.SquareCap}[st.cap])
+                stroker.setJoinStyle({"miter": Qt.MiterJoin, "round": Qt.RoundJoin, "bevel": Qt.BevelJoin}[st.join])
+                parts.append(stroker.createStroke(path))
+            self._c_parts = parts
+        for part in parts:
+            if part.intersects(rect):
+                return True
+        return False
 
     def anchor_count(self):
         return sum(len(s.anchors) for s in self.subpaths)
@@ -802,9 +878,26 @@ def walk(node, include_self=False):
     """Depth-first, back-to-front traversal of all descendants."""
     if include_self:
         yield node
-    if node.is_group():
-        for c in node.children:
-            yield from walk(c, True)
+    if not node.is_group():
+        return
+    stack = [iter(node.children)]
+    while stack:
+        for c in stack[-1]:
+            yield c
+            if c.is_group():
+                stack.append(iter(c.children))
+                break
+        else:
+            stack.pop()
+
+
+def box4(n):
+    """(left, top, right, bottom) of a leaf's bounds as plain floats, cached on the node."""
+    c = n.__dict__.get("_c_b4")
+    if c is None:
+        b = n.bounds()
+        c = n.__dict__["_c_b4"] = (b.left(), b.top(), b.right(), b.bottom())
+    return c
 
 
 def leaves(node):
@@ -835,6 +928,119 @@ def clone_tree(node, parent=None):
     return c
 
 
+_FP_SKIP = frozenset(("parent", "children", "subpaths", "style", "clip", "id"))
+_SIMPLE = (int, float, str, bool, tuple, type(None))
+
+
+_FP_KEYS: dict = {}
+
+
+def _fp(node):
+    """Cheap fingerprint of the attributes that can change without a touch() (name, style, flags ...)."""
+    d = node.__dict__
+    cls = node.__class__
+    keys = _FP_KEYS.get(cls)
+    if keys is None:
+        keys = _FP_KEYS[cls] = [k for k in d if k[0] != "_" and k not in _FP_SKIP]
+    try:
+        vals = [d[k] for k in keys]
+    except KeyError:
+        keys = _FP_KEYS[cls] = [k for k in d if k[0] != "_" and k not in _FP_SKIP]
+        vals = [d[k] for k in keys]
+    st = d.get("style")
+    if st is not None:
+        vals.append((st.fill, st.stroke, st.width, st.cap, st.join, st.arrow_start, st.arrow_end,
+                     st.arrow_size, st.fill_rule, tuple(st.dash)))
+    clip = d.get("clip")
+    if clip:
+        vals.append((id(clip), len(clip)))
+    return vals
+
+
+def snapshot_tree(node, parent=None):
+    """Like :func:`clone_tree`, but a leaf that has not changed since it was last snapshotted shares
+    its (immutable) snapshot copy instead of being copied again."""
+    if node.is_group():
+        c = node.__class__.__new__(node.__class__)
+        d = c.__dict__
+        for k, v in node.__dict__.items():
+            if k in _SKIP_CLONE or k.startswith("_c_"):
+                continue
+            d[k] = v
+        c.parent = parent
+        c.clip = [sp.copy() for sp in node.clip] if node.clip else None
+        c.children = [snapshot_tree(ch, c) for ch in node.children]
+        return c
+    return leaf_memo(node, parent)
+
+
+def leaf_memo(node, parent=None):
+    """The shared snapshot copy of a leaf (created on first use, dropped when the node is touched)."""
+    fp = _fp(node)
+    memo = node.__dict__.get("_c_snap")
+    if memo is not None and memo[1] == fp:
+        return memo[0]
+    c = clone_tree(node, parent)
+    node.__dict__["_c_snap"] = (c, fp)
+    return c
+
+
+def restore_tree(snap, parent, live_of):
+    """Rebuild a live tree from a snapshot, keeping the live leaf objects that are still identical to it."""
+    if snap.is_group():
+        c = snap.__class__.__new__(snap.__class__)
+        d = c.__dict__
+        for k, v in snap.__dict__.items():
+            if k in _SKIP_CLONE or k.startswith("_c_"):
+                continue
+            d[k] = v
+        c.parent = parent
+        c.clip = [sp.copy() for sp in snap.clip] if snap.clip else None
+        c.children = [restore_tree(ch, c, live_of) for ch in snap.children]
+        return c
+    live = live_of(snap.id)
+    if live is not None and not live.is_group():
+        memo = live.__dict__.get("_c_snap")
+        if memo is not None and memo[0] is snap and memo[1] == _fp(live):
+            live.parent = parent
+            return live
+    c = clone_tree(snap, parent)
+    c.__dict__["_c_snap"] = (snap, _fp(c))
+    return c
+
+
+def trees_equal(a, b):
+    """Deep structural comparison (debug / tests)."""
+    if a.__class__ is not b.__class__ or a.id != b.id:
+        return False
+    for k in set(a.__dict__) | set(b.__dict__):
+        if k in ("parent", "children", "subpaths", "style", "clip") or k.startswith("_"):
+            continue
+        if a.__dict__.get(k) != b.__dict__.get(k):
+            return False
+    if (a.__dict__.get("style") is None) != (b.__dict__.get("style") is None):
+        return False
+    if "style" in a.__dict__ and a.style.__dict__ != b.style.__dict__:
+        return False
+    for attr in ("subpaths", "clip"):
+        x, y = a.__dict__.get(attr), b.__dict__.get(attr)
+        if (x or None) is None and (y or None) is None:
+            continue
+        if x is None or y is None or len(x) != len(y):
+            return False
+        for sa, sb in zip(x, y):
+            if sa.closed != sb.closed or len(sa.anchors) != len(sb.anchors):
+                return False
+            for p, q in zip(sa.anchors, sb.anchors):
+                if (p.x, p.y, p.ix, p.iy, p.ox, p.oy, p.smooth) != (q.x, q.y, q.ix, q.iy, q.ox, q.oy, q.smooth):
+                    return False
+    if a.is_group():
+        if len(a.children) != len(b.children):
+            return False
+        return all(trees_equal(x, y) for x, y in zip(a.children, b.children))
+    return True
+
+
 def fresh_copy(node):
     """Copy of a node (and subtree) with brand-new ids and no parent."""
     c = clone_tree(node, None)
@@ -856,6 +1062,7 @@ def common_ancestors_pruned(nodes):
 class Document(QObject):
     structureChanged = Signal()
     contentChanged = Signal()
+    warmed = Signal()           # idle-time cache preparation finished (see schedule_warmup)
     selectionChanged = Signal()
     restored = Signal()
     metaChanged = Signal()
@@ -997,6 +1204,8 @@ class Document(QObject):
     def reassign_to_sheets(self, nodes):
         """Nodes dragged so that their centre lies on another sheet become part of that sheet."""
         moved = False
+        if len(self.sheets()) < 2:
+            return False
         for n in common_ancestors_pruned(nodes):
             b = n.bounds()
             if b.isNull() and not (b.width() or b.height()):
@@ -1020,10 +1229,18 @@ class Document(QObject):
 
     # lookup ----------------------------------------------------------
     def find(self, node_id):
-        for n in walk(self.root, True):
-            if n.id == node_id:
-                return n
-        return None
+        idx = self.__dict__.get("_id_index")
+        if idx is not None:
+            n = idx.get(node_id)
+            if n is not None:
+                top = n
+                while top.parent is not None:
+                    top = top.parent
+                if top is self.root:
+                    return n
+        # unknown, moved out of the tree or tree replaced (undo): rebuild the index once
+        idx = self._id_index = {x.id: x for x in walk(self.root, True)}
+        return idx.get(node_id)
 
     def all_nodes(self):
         return list(walk(self.root))
@@ -1076,11 +1293,18 @@ class Document(QObject):
 
     # undo ------------------------------------------------------------
     def _snapshot(self):
-        return (clone_tree(self.root), [n.id for n in self.selection], self._active_id, self._current_id)
+        root = snapshot_tree(self.root)
+        if _CHECK_SNAPSHOTS:
+            assert trees_equal(root, clone_tree(self.root)), "snapshot differs from the document"
+        return (root, [n.id for n in self.selection], self._active_id, self._current_id)
 
     def _restore(self, snap):
         root, sel_ids, active, current = snap
-        self.root = clone_tree(root)
+        old_index = {x.id: x for x in walk(self.root, True)}
+        self.root = restore_tree(root, None, old_index.get)
+        self._id_index = None
+        if _CHECK_SNAPSHOTS:
+            assert trees_equal(self.root, root), "restored document differs from its snapshot"
         self._active_id = active
         self._current_id = current
         self.selection = [n for n in (self.find(i) for i in sel_ids) if n is not None]
@@ -1089,6 +1313,41 @@ class Document(QObject):
         self.contentChanged.emit()
         self.selectionChanged.emit()
         self.sheetChanged.emit()
+
+    # background preparation ------------------------------------------
+    def schedule_warmup(self, delay_ms=300):
+        """Prepare per-vector caches (undo copies, bounds, snap points) in idle time, so the first
+        drag / edit on a huge drawing doesn't have to build them all at once."""
+        t = self.__dict__.get("_warm_timer")
+        if t is None:
+            t = self._warm_timer = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._warm_step)
+        self._warm_gen = None
+        t.start(delay_ms)
+
+    def _warm_step(self):
+        from .snap import _node_points
+        if self._warm_gen is None:
+            self._warm_gen = walk(self.root)
+        t0 = time.perf_counter()
+        n = 0
+        for node in self._warm_gen:
+            if node.is_group():
+                continue
+            try:
+                node.bounds()
+                leaf_memo(node)
+                if node.kind in ("path", "image", "text", "measure"):
+                    _node_points(node)
+            except Exception:
+                pass
+            n += 1
+            if (n & 7) == 0 and time.perf_counter() - t0 > 0.006:
+                self._warm_timer.start(8)
+                return
+        self._warm_gen = None
+        self.warmed.emit()
 
     def begin_edit(self, merge_key=None):
         key, t = self._merge

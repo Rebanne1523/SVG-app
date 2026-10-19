@@ -1,12 +1,13 @@
 """Snapping: anchors, bounding-box alignment lines and stroke edges."""
 from __future__ import annotations
 
-import bisect
 import math
 
+import numpy as np
 from PySide6.QtCore import QRectF
 
-from .geometry import dist, flatten_cubic, nearest_on_polyline
+from .geometry import flatten_cubic
+from .model import leaves
 
 
 def visible_leaves(doc, exclude=()):
@@ -54,111 +55,258 @@ def polylines_of(node):
     return res
 
 
+_LABELS = ["Center", "Anchor", "Corner", "Sheet corner", "Sheet center"]
+_XL = ["Left edge", "Center", "Right edge", "Sheet edge", "Sheet center"]
+_YL = ["Top edge", "Center", "Bottom edge", "Sheet edge", "Sheet center"]
+
+
+def _node_points(n):
+    """Snap points of a leaf as an (N, 2) array and a matching label index (cached on the node)."""
+    c = n.__dict__.get("_c_snappts")
+    if c is not None:
+        return c
+    b = n.bounds()
+    l, t, r, bt = b.left(), b.top(), b.right(), b.bottom()
+    pts = [((l + r) / 2, (t + bt) / 2)]
+    lab = [0]
+    if n.kind == "path":
+        for sp in n.subpaths:
+            for a in sp.anchors:
+                pts.append((a.x, a.y))
+                lab.append(1)
+    else:
+        for q in ((l, t), (r, t), (l, bt), (r, bt)):
+            pts.append(q)
+            lab.append(2)
+    if n.kind == "measure":
+        g = n.geometry()
+        for s0, s1 in g["segs"]:
+            pts.append(tuple(s0))
+            pts.append(tuple(s1))
+            lab += [1, 1]
+    res = (np.asarray(pts, dtype=float).reshape(-1, 2), np.asarray(lab, dtype=np.int8),
+           (l, (l + r) / 2, r, t, (t + bt) / 2, bt))
+    n.__dict__["_c_snappts"] = res
+    return res
+
+
 class SnapIndex:
+    """Anchors, centres, corners and alignment lines of every visible vector, in sorted numpy arrays
+    so a lookup costs microseconds however big the drawing is. Built once per document state;
+    :meth:`view` hides the vectors being dragged."""
+
     def __init__(self, doc, exclude=(), view_rect: QRectF | None = None, page=True):
-        self.points = []
-        self.grid = {}
-        self.cell = 24.0
-        xs, ys = [], []
-        nodes = visible_leaves(doc, exclude)
-        if view_rect is not None:
-            infl = view_rect.adjusted(-view_rect.width() * 0.25, -view_rect.height() * 0.25,
-                                      view_rect.width() * 0.25, view_rect.height() * 0.25)
-        for n in nodes:
-            b = n.bounds()
-            if view_rect is not None and not infl.intersects(b.adjusted(-1, -1, 1, 1)):
-                continue
-            l, t, r, bt = b.left(), b.top(), b.right(), b.bottom()
-            cx, cy = (l + r) / 2, (t + bt) / 2
-            xs += [(l, "Left edge"), (cx, "Center"), (r, "Right edge")]
-            ys += [(t, "Top edge"), (cy, "Center"), (bt, "Bottom edge")]
-            self._add_point((cx, cy), "Center")
-            if n.kind == "path":
-                for sp in n.subpaths:
-                    for a in sp.anchors:
-                        self._add_point(a.p, "Anchor")
-            else:
-                for p in ((l, t), (r, t), (l, bt), (r, bt)):
-                    self._add_point(p, "Corner")
-            if n.kind == "measure":
-                g = n.geometry()
-                for s0, s1 in g["segs"]:
-                    self._add_point(s0, "Anchor")
-                    self._add_point(s1, "Anchor")
+        self.leaves = leaves_ = visible_leaves(doc)
+        n = len(leaves_)
+        self.index_of = {id(m): i for i, m in enumerate(leaves_)}
+        pts, labs, counts, bb = [], [], [], []
+        for m in leaves_:
+            p, lab, box = _node_points(m)
+            pts.append(p)
+            labs.append(lab)
+            counts.append(len(p))
+            bb.append(box)
+        owner = np.repeat(np.arange(n, dtype=np.int64), counts) if n else np.empty(0, dtype=np.int64)
+        B = np.asarray(bb, dtype=float).reshape(-1, 6)
+        ar = np.arange(n, dtype=np.int64)
+        xv, xl, xo = B[:, 0:3].ravel(), np.tile(np.array([0, 1, 2], dtype=np.int8), n), np.repeat(ar, 3)
+        yv, yl, yo = B[:, 3:6].ravel(), xl, xo
+        owners = [owner] if n else []
         if page:
+            extra, elab = [], []
+            sx, sy = [], []
             for sh in doc.sheets():
                 x0, y0, W, H = sh.x, sh.y, sh.width, sh.height
-                xs += [(x0, "Sheet edge"), (x0 + W / 2, "Sheet center"), (x0 + W, "Sheet edge")]
-                ys += [(y0, "Sheet edge"), (y0 + H / 2, "Sheet center"), (y0 + H, "Sheet edge")]
+                sx.append((x0, x0 + W / 2, x0 + W))
+                sy.append((y0, y0 + H / 2, y0 + H))
                 for pt in ((x0, y0), (x0 + W, y0), (x0, y0 + H), (x0 + W, y0 + H)):
-                    self._add_point(pt, "Sheet corner")
-                self._add_point((x0 + W / 2, y0 + H / 2), "Sheet center")
-        xs.sort()
-        ys.sort()
-        self.xs = xs
-        self.ys = ys
-        self._xk = [v for v, _ in xs]
-        self._yk = [v for v, _ in ys]
-
-    def _add_point(self, p, label):
-        self.points.append((p, label))
-        key = (int(math.floor(p[0] / self.cell)), int(math.floor(p[1] / self.cell)))
-        self.grid.setdefault(key, []).append((p, label))
-
-    def nearest_point(self, pt, thr):
-        best = None
-        bd = thr
-        cx, cy = int(math.floor(pt[0] / self.cell)), int(math.floor(pt[1] / self.cell))
-        r = int(math.ceil(thr / self.cell))
-        for ix in range(cx - r, cx + r + 1):
-            for iy in range(cy - r, cy + r + 1):
-                for p, label in self.grid.get((ix, iy), ()):
-                    d = dist(p, pt)
-                    if d <= bd:
-                        bd, best = d, (p, label)
-        return best
+                    extra.append(pt)
+                    elab.append(3)
+                extra.append((x0 + W / 2, y0 + H / 2))
+                elab.append(4)
+            if extra:
+                pts.append(np.asarray(extra, dtype=float))
+                labs.append(np.asarray(elab, dtype=np.int8))
+                owners.append(np.full(len(extra), -1, dtype=np.int64))
+                k = len(sx)
+                sl = np.tile(np.array([3, 4, 3], dtype=np.int8), k)
+                so = np.full(3 * k, -1, dtype=np.int64)
+                xv = np.concatenate([xv, np.asarray(sx, dtype=float).ravel()])
+                yv = np.concatenate([yv, np.asarray(sy, dtype=float).ravel()])
+                xl = np.concatenate([xl, sl])
+                yl = np.concatenate([yl, sl])
+                xo = np.concatenate([xo, so])
+                yo = np.concatenate([yo, so])
+        if pts:
+            P = np.concatenate(pts)
+            L = np.concatenate(labs)
+            O = np.concatenate(owners)
+            order = np.argsort(P[:, 0], kind="stable")
+            self._px, self._py, self._pl, self._po = P[order, 0], P[order, 1], L[order], O[order]
+        else:
+            self._px = self._py = np.empty(0)
+            self._pl = np.empty(0, dtype=np.int8)
+            self._po = np.empty(0, dtype=np.int64)
+        self._xv, self._xl, self._xo = self._sorted(xv, xl, xo)
+        self._yv, self._yl, self._yo = self._sorted(yv, yl, yo)
+        self._views = {}
 
     @staticmethod
-    def _nearest(keys, items, v, thr):
-        i = bisect.bisect_left(keys, v)
-        best = None
-        bd = thr
-        for j in (i - 1, i):
-            if 0 <= j < len(keys):
-                d = abs(keys[j] - v)
-                if d <= bd:
-                    bd, best = d, items[j]
-        return best
+    def _sorted(vals, labs, owners):
+        v = np.asarray(vals, dtype=float)
+        o = np.argsort(v, kind="stable")
+        return v[o], np.asarray(labs, dtype=np.int8)[o], np.asarray(owners, dtype=np.int64)[o]
+
+    def view(self, exclude=()):
+        """Index that ignores ``exclude`` (nodes or folders)."""
+        key = frozenset(id(n) for n in exclude)
+        v = self._views.get(key)
+        if v is None:
+            excl = np.zeros(len(self.leaves) + 1, dtype=bool)     # last slot (owner -1: sheets) stays False
+            for n in exclude:
+                for m in (leaves(n) if n.is_group() else (n,)):
+                    i = self.index_of.get(id(m))
+                    if i is not None:
+                        excl[i] = True
+            v = _SnapView(self, excl)
+            if len(self._views) > 8:
+                self._views.clear()
+            self._views[key] = v
+        return v
+
+    def nearest_point(self, pt, thr):
+        return self.view().nearest_point(pt, thr)
 
     def nearest_x(self, x, thr):
-        return self._nearest(self._xk, self.xs, x, thr)
+        return self.view().nearest_x(x, thr)
 
     def nearest_y(self, y, thr):
-        return self._nearest(self._yk, self.ys, y, thr)
+        return self.view().nearest_y(y, thr)
+
+
+class _SnapView:
+    def __init__(self, base, excl):
+        self.b = base
+        self.excl = excl
+
+    def nearest_point(self, pt, thr):
+        b = self.b
+        px = b._px
+        if px.size == 0:
+            return None
+        i0 = np.searchsorted(px, pt[0] - thr, "left")
+        i1 = np.searchsorted(px, pt[0] + thr, "right")
+        if i1 <= i0:
+            return None
+        d = np.hypot(px[i0:i1] - pt[0], b._py[i0:i1] - pt[1])
+        d[self.excl[b._po[i0:i1]]] = np.inf
+        k = int(np.argmin(d))
+        if d[k] > thr:
+            return None
+        j = i0 + k
+        return (float(px[j]), float(b._py[j])), _LABELS[int(b._pl[j])]
+
+    def _nearest(self, vals, labs, owners, names, v, thr):
+        if vals.size == 0:
+            return None
+        i0 = int(np.searchsorted(vals, v - thr, "left"))
+        i1 = int(np.searchsorted(vals, v + thr, "right"))
+        if i1 <= i0:
+            return None
+        d = np.abs(vals[i0:i1] - v)
+        d[self.excl[owners[i0:i1]]] = np.inf
+        k = int(np.argmin(d))
+        if d[k] > thr:
+            return None
+        j = i0 + k
+        return float(vals[j]), names[int(labs[j])]
+
+    def nearest_x(self, x, thr):
+        b = self.b
+        return self._nearest(b._xv, b._xl, b._xo, _XL, x, thr)
+
+    def nearest_y(self, y, thr):
+        b = self.b
+        return self._nearest(b._yv, b._yl, b._yo, _YL, y, thr)
+
+
+def _node_segments(n):
+    """All segments of a leaf's outline as an (N, 4) array [x1, y1, x2, y2] (cached on the node)."""
+    c = n.__dict__.get("_c_segarr")
+    if c is not None:
+        return c
+    rows = []
+    for pts, closed in polylines_of(n):
+        m = len(pts)
+        for i in range(m - 1):
+            rows.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]))
+        if closed and m > 2:
+            rows.append((pts[-1][0], pts[-1][1], pts[0][0], pts[0][1]))
+    c = np.asarray(rows, dtype=float).reshape(-1, 4)
+    n.__dict__["_c_segarr"] = c
+    return c
 
 
 class EdgeIndex:
     """Nearest point on the outline of visible vectors (for the measure tool)."""
 
     def __init__(self, doc, exclude=(), view_rect: QRectF | None = None):
-        self.items = []
-        for n in visible_leaves(doc, exclude):
+        arrs, owners = [], []
+        self.index_of = {}
+        for n in visible_leaves(doc):
             if n.kind not in ("path", "measure"):
                 continue
-            b = n.bounds()
-            if view_rect is not None and not view_rect.intersects(b.adjusted(-1, -1, 1, 1)):
-                continue
-            self.items.append((b, polylines_of(n)))
+            a = _node_segments(n)
+            if a.size:
+                self.index_of[id(n)] = len(self.index_of)
+                arrs.append(a)
+                owners.append(np.full(len(a), len(self.index_of) - 1, dtype=np.int64))
+        S = np.concatenate(arrs) if arrs else np.empty((0, 4))
+        O = np.concatenate(owners) if owners else np.empty(0, dtype=np.int64)
+        # sort by the segment's smallest x so a query only looks at a window of them
+        mn = np.minimum(S[:, 0], S[:, 2])
+        order = np.argsort(mn, kind="stable")
+        self._S = S[order]
+        self._O = O[order]
+        self._mn = mn[order]
+        self._mx_cum = np.maximum.accumulate(np.maximum(self._S[:, 0], self._S[:, 2])) if len(S) else mn
+        self._n = len(self.index_of)
+        self._excl = np.zeros(self._n + 1, dtype=bool)
+        self._excl_key = frozenset()
+        self.set_exclude(exclude)
+
+    def set_exclude(self, exclude):
+        key = frozenset(id(n) for n in exclude)
+        if key == self._excl_key:
+            return
+        self._excl_key = key
+        self._excl = np.zeros(self._n + 1, dtype=bool)
+        for n in exclude:
+            for m in (leaves(n) if n.is_group() else (n,)):
+                i = self.index_of.get(id(m))
+                if i is not None:
+                    self._excl[i] = True
 
     def nearest(self, pt, thr):
-        best = None
-        bd = thr
-        for b, polys in self.items:
-            if (pt[0] < b.left() - thr or pt[0] > b.right() + thr or
-                    pt[1] < b.top() - thr or pt[1] > b.bottom() + thr):
-                continue
-            for pts, closed in polys:
-                d, q, _, _ = nearest_on_polyline(pts, pt, closed)
-                if q is not None and d <= bd:
-                    bd, best = d, q
-        return best
+        S = self._S
+        if len(S) == 0:
+            return None
+        # segments whose x-extent can reach [pt.x - thr, pt.x + thr]
+        hi = int(np.searchsorted(self._mn, pt[0] + thr, "right"))
+        lo = int(np.searchsorted(self._mx_cum, pt[0] - thr, "left"))
+        if hi <= lo:
+            return None
+        W = S[lo:hi]
+        ax, ay, bx, by = W[:, 0], W[:, 1], W[:, 2], W[:, 3]
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(l2 < 1e-18, 0.0, ((pt[0] - ax) * dx + (pt[1] - ay) * dy) / l2)
+        t = np.clip(t, 0.0, 1.0)
+        qx, qy = ax + dx * t, ay + dy * t
+        d = np.hypot(pt[0] - qx, pt[1] - qy)
+        d[self._excl[self._O[lo:hi]]] = np.inf
+        k = int(np.argmin(d))
+        if d[k] > thr:
+            return None
+        return (float(qx[k]), float(qy[k]))

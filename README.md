@@ -155,6 +155,18 @@ Para modificarla: selecciónala con **Mover** y en la barra de arriba cambia col
 - **Abre / importa**: `.vflow`, `.svg`, `.svgz`, `.pdf` (cada página, una hoja; el PDF se convierte a vectores y el texto pasa a contornos).
 - **Guarda**: proyecto `.vflow`. Exporta **PDF vectorial** (uno o varios documentos, con páginas unidas si quieres), **SVG** por hoja (capas = grupos de Inkscape, con nombres, visibilidad y bloqueo) y **PNG**. Las mediciones y flechas se guardan con atributos propios para recuperarlas editables y además se dibujan con elementos SVG estándar.
 
+### Archivos pesados
+
+Pensado para que un dibujo enorme (decenas de miles de trazos, o un solo trazo con miles de nodos) siga siendo fluido:
+
+- **El lienzo no repinta todo cada vez.** La escena se dibuja una vez en una imagen y moverse, hacer hover o seleccionar solo la muestra. Si hay que redibujarla (zoom, cambios) se hace **por trozos de pocos milisegundos**: la ventana no se congela y mientras tanto se ve la imagen anterior reescalada.
+- **Arrastrar** (mover / escalar / rotar) saca los objetos de la imagen y los dibuja aparte; con selecciones muy grandes (más de 300 vectores) se mueve un mapa de bits y la transformación real se aplica al soltar.
+- **Picking, marquee y snapping** usan índices numéricos (numpy) que se preparan en los ratos libres.
+- **Deshacer** comparte entre copias los vectores que no cambiaron (antes copiaba el documento entero en cada edición).
+- **Capas:** las carpetas muy largas muestran los primeros 800 vectores y una fila "… N more" para ir cargando el resto.
+- **Selección directa (`A`)** dibuja todos los nodos solo si caben (600); con trazos de miles de nodos muestra los que están junto al cursor y los seleccionados.
+- Si algo se ve raro, `VF_NO_CACHE=1 ./VectorFlow.AppImage` desactiva la caché de dibujo (vuelve al modo antiguo, más lento).
+
 ### Limitaciones conocidas
 
 Dicho con claridad para que no haya sorpresas:
@@ -177,7 +189,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q      # importación, hojas, guardado, exportación, capas, herramientas, cubo, medición...
 ```
 
-Estructura: `vectorflow/model.py` (documento y undo), `svg_io.py` (SVG/PDF), `render.py`, `canvas.py` (vista, snap), `tools_*.py` (herramientas), `layers_panel.py`, `props.py` (barra de estilo), `fill.py` (cubo).
+Estructura: `vectorflow/model.py` (documento y undo), `svg_io.py` (SVG/PDF), `render.py`, `scenecache.py` (caché y dibujo por trozos), `hitindex.py` / `snap.py` (índices de picking y snapping), `canvas.py` (vista), `tools_*.py` (herramientas), `layers_panel.py`, `props.py` (barra de estilo), `fill.py` (cubo).
 
 ### Publicar una versión
 

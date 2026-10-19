@@ -22,11 +22,31 @@ from .model import Sheet
 COL_NAME, COL_EYE, COL_LOCK = 0, 1, 2
 
 
+CHUNK = 800            # children listed at once under a folder; the rest load on demand
+BUDGET = 2500          # items created in one rebuild (folders beyond it stay collapsed until opened)
+
+
 class NodeItem(QTreeWidgetItem):
     def __init__(self, node):
         super().__init__()
         self.node = node
         self.populated = False
+        self.shown = 0           # how many of the node's children are listed (from the top)
+
+
+class MoreItem(QTreeWidgetItem):
+    """"… N more" row at the end of a very long folder: click it to list the next batch."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+        self.setFlags(Qt.ItemIsEnabled)
+        self.setForeground(COL_NAME, QBrush(QColor(140, 170, 210)))
+        self.refresh()
+
+    def refresh(self):
+        left = len(self.owner.node.children) - self.owner.shown
+        self.setText(COL_NAME, f"… {left} more (click to show {min(left, CHUNK)})")
 
 
 class LayerTree(QTreeWidget):
@@ -59,6 +79,10 @@ class LayerTree(QTreeWidget):
     def mousePressEvent(self, e):
         item = self.itemAt(e.position().toPoint())
         col = self.columnAt(int(e.position().x()))
+        if isinstance(item, MoreItem):
+            if e.button() == Qt.LeftButton:
+                self.panel.show_more(item)
+            return
         if item is not None and col in (COL_EYE, COL_LOCK) and e.button() == Qt.LeftButton:
             if col == COL_EYE:
                 self.panel.toggle_visible(item.node, bool(e.modifiers() & Qt.AltModifier))
@@ -86,6 +110,8 @@ class LayerTree(QTreeWidget):
     def mouseDoubleClickEvent(self, e):
         item = self.itemAt(e.position().toPoint())
         col = self.columnAt(int(e.position().x()))
+        if isinstance(item, MoreItem):
+            return
         if item is not None and col == COL_NAME:
             n = item.node
             if n.kind == "path" and len(n.subpaths) > 1:
@@ -243,19 +269,41 @@ class LayersPanel(QWidget):
         it.setToolTip(COL_LOCK, "Lock / unlock")
         self._building = False
 
-    def _populate(self, it):
+    def _populate(self, it, budget=None):
         if it.populated:
             return
         it.populated = True
+        self._add_children(it, budget)
+
+    def _add_children(self, it, budget=None):
+        """List the next batch of ``it``'s children (topmost first)."""
         node = it.node
+        kids = node.children
+        total = len(kids)
+        start = it.shown
+        end = min(total, start + CHUNK)
+        was_building = self._building
         self._building = True
-        for c in reversed(node.children):
+        old_more = it.child(it.childCount() - 1) if it.childCount() else None
+        if isinstance(old_more, MoreItem):
+            it.takeChild(it.childCount() - 1)
+        for pos in range(start, end):
+            c = kids[total - 1 - pos]
             ci = self._make_item(c)
             it.addChild(ci)
-            if c.is_group() and c.expanded:
-                self._populate(ci)
+            if budget is not None:
+                budget[0] -= 1
+            if c.is_group() and c.expanded and (budget is None or budget[0] > 0):
+                self._populate(ci, budget)
                 ci.setExpanded(True)
-        self._building = False
+        it.shown = end
+        if end < total:
+            it.addChild(MoreItem(it))
+        self._building = was_building
+
+    def show_more(self, more):
+        owner = more.owner
+        self._add_children(owner)
 
     def enter(self, group):
         self.entered = group
@@ -303,11 +351,12 @@ class LayersPanel(QWidget):
         self._hl = None
         cur = d.current_sheet()
         top = self.entered if self.entered is not None else cur
+        budget = [BUDGET]
         for c in reversed(top.children if top is not None else []):
             it = self._make_item(c)
             self.tree.addTopLevelItem(it)
-            if c.is_group() and c.expanded:
-                self._populate(it)
+            if c.is_group() and c.expanded and budget[0] > 0:
+                self._populate(it, budget)
                 it.setExpanded(True)
         self._building = False
         self._syncing = False
@@ -329,7 +378,7 @@ class LayersPanel(QWidget):
                 for c in n.children:
                     upd(c)
 
-        for n in sel:
+        for n in sel[:400]:
             upd(n)
         self.opacity.blockSignals(True)
         self.opacity.setValue(int(round(sel[0].opacity * 100)) if sel else 100)
@@ -374,11 +423,17 @@ class LayersPanel(QWidget):
         self._syncing = True
         self.tree.clearSelection()
         last = None
+        big = len(d.selection) > 300     # don't build thousands of rows just to highlight them
+        sm = self.tree.selectionModel()
+        sm.blockSignals(True)
+        self.tree.setUpdatesEnabled(False)
         for n in d.selection:
-            it = self._ensure_item(n)
+            it = self.item_of.get(id(n)) if big else self._ensure_item(n)
             if it is not None:
                 it.setSelected(True)
                 last = it
+        sm.blockSignals(False)
+        self.tree.setUpdatesEnabled(True)
         if last is not None:
             self.tree.scrollToItem(last)
         target = d.active_container()
