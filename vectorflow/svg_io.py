@@ -5,9 +5,9 @@ import base64
 import gzip
 import json
 import math
-from functools import lru_cache
 import os
 import re
+from functools import lru_cache
 import xml.etree.ElementTree as ET
 
 from PySide6.QtGui import QColor

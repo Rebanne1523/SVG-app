@@ -10,24 +10,32 @@ from .model import box4
 
 class HitIndex:
     def __init__(self, doc):
+        for _ in self.steps(doc):
+            pass
+
+    def steps(self, doc):
+        """Build the index; a generator so a big drawing can be indexed in slices (yields every few ms of work)."""
         leaves, chains, rows = [], [], []
-
-        def rec(node, chain):
-            if not node.visible or node.locked:
-                return
-            if node.clip:
-                chain = chain + (node,)
-            if node.is_group():
-                for c in node.children:
-                    rec(c, chain)
-                return
-            st = getattr(node, "style", None)
-            leaves.append(node)
-            chains.append(chain)
-            rows.append(box4(node) + (st.width if st is not None else 0.0,))
-
-        for c in doc.root.children:
-            rec(c, ())
+        stack = [(iter(doc.root.children), ())]
+        count = 0
+        while stack:
+            it, chain = stack[-1]
+            for node in it:
+                if not node.visible or node.locked:
+                    continue
+                ch = chain + (node,) if node.clip else chain
+                if node.is_group():
+                    stack.append((iter(node.children), ch))
+                    break
+                st = getattr(node, "style", None)
+                leaves.append(node)
+                chains.append(ch)
+                rows.append(box4(node) + (st.width if st is not None else 0.0,))
+                count += 1
+                if count % 2000 == 0:
+                    yield
+            else:
+                stack.pop()
         self.leaves = leaves
         self.chains = chains
         a = np.asarray(rows, dtype=float).reshape(-1, 5)

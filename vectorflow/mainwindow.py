@@ -1,9 +1,10 @@
 """Main window: menus, toolbox, option bars, layers dock and file handling."""
 from __future__ import annotations
 
+import gc
 import os
 
-from PySide6.QtCore import QRectF, QSettings, QSize, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QRectF, QSettings, QSize, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence, QPalette
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
                                QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -407,6 +408,7 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.canvas.fit_view()
         self.canvas.set_tool(self.canvas.tool.name if self.canvas.tool else "select")
+        settle_gc()
 
     def _update_title(self):
         name = os.path.basename(self.doc.path) if self.doc.path else (
@@ -504,6 +506,7 @@ class MainWindow(QMainWindow):
             return
         QApplication.restoreOverrideCursor()
         self.remember_dir(paths[0])
+        settle_gc()
         if added:
             self.canvas.fit_view()
             msg = f"Imported {len(added)} sheet(s)"
@@ -722,6 +725,39 @@ class MainWindow(QMainWindow):
                           "(Inkscape-compatible layers).")
 
 
+def settle_gc():
+    """Free the cycles left by a previous drawing (parent <-> children links) right after a document
+    was replaced, while the wait cursor is still up."""
+    gc.collect()
+
+
+class GcPolicy(QObject):
+    """A big drawing is a million small Python objects, and one full garbage-collection pass over them
+    freezes the window for up to a second. So the automatic collector is switched off: young objects
+    are collected twice a second (cheap) and a full pass only runs when the user has been
+    idle for a while or a document was just replaced."""
+
+    YOUNG_MS = 500
+    IDLE_MS = 20000
+
+    def __init__(self, app):
+        super().__init__(app)
+        gc.disable()
+        self._young = QTimer(self)
+        self._young.timeout.connect(lambda: gc.collect(1))
+        self._young.start(self.YOUNG_MS)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.timeout.connect(gc.collect)
+        app.installEventFilter(self)
+        self._idle.start(self.IDLE_MS)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.KeyPress, QEvent.Wheel):
+            self._idle.start(self.IDLE_MS)
+        return False
+
+
 def main(argv=None):
     import sys
     argv = list(sys.argv if argv is None else argv)
@@ -731,6 +767,7 @@ def main(argv=None):
             and os.environ.get("VECTORFLOW_QT_DIALOGS") != "1":
         os.environ["QT_QPA_PLATFORMTHEME"] = "xdgdesktopportal"
     app = QApplication(argv)
+    GcPolicy(app)
     app.setApplicationName("VectorFlow")
     app.setDesktopFileName("vectorflow")
     app.setWindowIcon(app_icon())

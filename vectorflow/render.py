@@ -158,6 +158,18 @@ def _culled(node, cull, min_size):
     return False
 
 
+def _draw_tiny(painter, node, opacity):
+    """A vector smaller than a couple of pixels: a flat rectangle of its colour looks the same and is
+    several times cheaper than anti-aliased path painting."""
+    st = node.style
+    col = st.fill if st.fill else (st.stroke if st.stroke and st.width > 0 else None)
+    if col is None:
+        return
+    l, t, r, b = box4(node)
+    painter.setOpacity(opacity)
+    painter.fillRect(QRectF(l, t, max(r - l, 0.0), max(b - t, 0.0)), brush_of(col))
+
+
 def _draw_leaf(painter, node, opacity):
     kind = node.kind
     if kind == "path":
@@ -218,7 +230,8 @@ def draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None,
     painter.setOpacity(parent_opacity)
 
 
-def iter_draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None, min_size=0.0, only=None):
+def iter_draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None, min_size=0.0, only=None,
+                   tiny=0.0):
     """Generator twin of :func:`draw_node`: yields after every painted leaf so the caller can
     time-slice a big drawing across event-loop turns. ``only`` (a set of nodes) restricts the
     painting to those leaves."""
@@ -240,8 +253,15 @@ def iter_draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=
         painter.setClipPath(clip, Qt.IntersectClip)
     if not leaf:
         for c in node.children:
-            yield from iter_draw_node(painter, c, opacity, skip, cull, min_size, only)
+            yield from iter_draw_node(painter, c, opacity, skip, cull, min_size, only, tiny)
     else:
+        if tiny > 0.0 and node.kind == "path" and not node.clip and not has_arrows(node):
+            l, t, r, b = box4(node)
+            if r - l < tiny and b - t < tiny:
+                _draw_tiny(painter, node, opacity)
+                yield
+                painter.setOpacity(parent_opacity)
+                return
         _draw_leaf(painter, node, opacity)
         yield
     if clip is not None:
@@ -257,11 +277,11 @@ def render_document(painter: QPainter, doc, skip=None, cull=None, min_size=0.0):
     painter.setOpacity(1.0)
 
 
-def iter_render_document(painter: QPainter, doc, skip=None, cull=None, min_size=0.0, only=None):
+def iter_render_document(painter: QPainter, doc, skip=None, cull=None, min_size=0.0, only=None, tiny=0.0):
     painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setRenderHint(QPainter.TextAntialiasing, True)
     for c in doc.root.children:
-        yield from iter_draw_node(painter, c, 1.0, skip, cull, min_size, only)
+        yield from iter_draw_node(painter, c, 1.0, skip, cull, min_size, only, tiny)
     painter.setOpacity(1.0)
 
 

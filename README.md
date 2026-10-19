@@ -162,6 +162,7 @@ Pensado para que un dibujo enorme (decenas de miles de trazos, o un solo trazo c
 - **El lienzo no repinta todo cada vez.** La escena se dibuja una vez en una imagen y moverse, hacer hover o seleccionar solo la muestra. Si hay que redibujarla (zoom, cambios) se hace **por trozos de pocos milisegundos**: la ventana no se congela y mientras tanto se ve la imagen anterior reescalada.
 - **Arrastrar** (mover / escalar / rotar) saca los objetos de la imagen y los dibuja aparte; con selecciones muy grandes (más de 300 vectores) se mueve un mapa de bits y la transformación real se aplica al soltar.
 - **Picking, marquee y snapping** usan índices numéricos (numpy) que se preparan en los ratos libres.
+- **Recolector de basura de Python:** con un millón de objetos vivos cada pasada completa congelaba la ventana hasta un segundo; ahora solo se ejecuta al abrir un archivo o tras 20 s sin tocar nada (entre medias se limpia solo lo reciente, que es barato).
 - **Deshacer** comparte entre copias los vectores que no cambiaron (antes copiaba el documento entero en cada edición).
 - **Capas:** las carpetas muy largas muestran los primeros 800 vectores y una fila "… N more" para ir cargando el resto.
 - **Selección directa (`A`)** dibuja todos los nodos solo si caben (600); con trazos de miles de nodos muestra los que están junto al cursor y los seleccionados.

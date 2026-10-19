@@ -32,7 +32,8 @@ def settle(canvas, limit=30):
     while time.time() - t0 < limit:
         a.processEvents(QEventLoop.AllEvents, 20)
         n += 1
-        busy = canvas.scene.busy() or canvas.live_scene.busy() or canvas._linger is not None
+        busy = (canvas.scene.busy() or canvas.live_scene.busy() or canvas._linger is not None
+                or canvas.scene._refine.isActive() or canvas.scene._exact_now)
         if not busy and n > 3:
             break
     a.processEvents()
@@ -307,3 +308,105 @@ def test_direct_tool_vectorised_hits_match_brute_force():
     tool.sel = [(node, sp.anchors[0])]                                  # closed subpath wraps around
     near = {id(b) for _, _, b in tool._near_selected()}
     assert near == {id(sp.anchors[-1]), id(sp.anchors[0]), id(sp.anchors[1])}
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_random_session_never_shows_a_stale_picture(seed, monkeypatch):
+    """Random edits, drags, undo/redo, visibility, grouping and view changes: after each one the cached
+    canvas must equal a direct painting of the document."""
+    monkeypatch.setattr("vectorflow.canvas.LIVE_LAYER_MIN", 6)
+    model._CHECK_SNAPSHOTS = True
+    try:
+        rnd = random.Random(seed)
+        app()
+        c = Canvas(make_doc(45, seed=seed))
+        c.resize(420, 320)
+        c.show()
+        from vectorflow.tools_select import SelectTool
+        c.register_tool(SelectTool(c))
+        c.set_tool("select")
+        c.snap_enabled = rnd.random() < 0.5
+        c.fit_view()
+        settle(c)
+        doc = c.doc
+        d = Driver(c)
+
+        def leaves():
+            return [n for n in walk(doc.root) if not n.is_group()]
+
+        def check(what):
+            settle(c)
+            m = mismatch(grab(c), direct(c))
+            assert m < 0.003, f"{what}: {m:.4f} of the pixels differ"
+
+        for step in range(30):
+            c.scene.render_ms = rnd.choice([0.5, 0.5, 60.0])          # light or heavy scene
+            op = rnd.choice(["drag1", "dragN", "color", "delete", "undo", "redo", "hide", "group", "zoom", "pan",
+                             "width", "nudge"])
+            ls = leaves()
+            if not ls:
+                break
+            if op in ("drag1", "dragN"):
+                k = 1 if op == "drag1" else rnd.randint(7, 15)
+                sel = rnd.sample(ls, min(k, len(ls)))
+                doc.set_selection(sel)
+                settle(c)
+                a0 = sel[0].subpaths[0].anchors[0].p
+                d.press(a0)
+                if c.tool.mode != "move":
+                    d.release(a0)
+                    continue
+                for i in range(1, 5):
+                    d.move((a0[0] + 12 * i, a0[1] + 7 * i))
+                    if rnd.random() < 0.5:
+                        c.repaint()
+                        tol = 0.05 if c.live and c.live["layer"] else 0.003     # a moved bitmap is resampled
+                        assert mismatch(grab(c), direct(c)) < tol, f"mid-drag {op} (seed {seed}, step {step})"
+                d.release((a0[0] + 48, a0[1] + 28))
+            elif op == "color":
+                tgt = rnd.sample(ls, min(4, len(ls)))
+                with doc.edit():
+                    for n in tgt:
+                        n.style.fill = (rnd.randrange(256), rnd.randrange(256), rnd.randrange(256), 255)
+            elif op == "width":
+                n = rnd.choice(ls)
+                with doc.edit():
+                    n.style.width = rnd.choice([0.5, 2, 5, 9])
+                    n.touch()
+            elif op == "delete":
+                doc.delete(rnd.sample(ls, min(3, len(ls))))
+            elif op == "undo":
+                doc.undo()
+            elif op == "redo":
+                doc.redo()
+            elif op == "hide":
+                n = rnd.choice(ls)
+                with doc.edit(structure=True):
+                    n.visible = not n.visible
+            elif op == "group":
+                sel = rnd.sample(ls, min(3, len(ls)))
+                if all(n.parent is sel[0].parent for n in sel):
+                    doc.group(sel)
+            elif op == "zoom":
+                c.zoom_by(rnd.choice([0.7, 1.3, 1.6]), (rnd.uniform(50, 350), rnd.uniform(50, 250)))
+            elif op == "pan":
+                c.pan_by(rnd.uniform(-120, 120), rnd.uniform(-90, 90))
+            elif op == "nudge":
+                doc.set_selection(rnd.sample(ls, min(5, len(ls))))
+                d.key(Qt.Key_Right, Qt.ShiftModifier)
+            check(f"{op} (seed {seed}, step {step})")
+        c.close()
+    finally:
+        model._CHECK_SNAPSHOTS = False
+
+
+def test_zoomed_out_tiny_vectors_still_look_right():
+    app()
+    doc = make_doc(900, seed=5, w=6000, h=5000)              # a lot of vectors a pixel or two wide when zoomed out
+    c = Canvas(doc)
+    c.resize(500, 400)
+    c.show()
+    c.fit_view()
+    settle(c, 60)
+    assert mismatch(grab(c), direct(c), tol=40) < 0.02
+    c.close()

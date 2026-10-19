@@ -20,9 +20,11 @@ from .render import iter_render_document
 ENABLED = not os.environ.get("VF_NO_CACHE")      # VF_NO_CACHE=1 paints every frame directly (debugging)
 LIGHT_MS = 8.0          # a scene that renders faster than this is drawn synchronously
 SLICE_MS = 9.0          # time budget per event-loop turn for a heavy scene
+REFINE_MS = 180         # after this long without panning, redraw a heavy scene at the exact position
 DEBOUNCE_MS = 25        # wait this long for the view to settle before re-rendering a heavy scene
 MARGIN = 0.2            # extra area rendered around the viewport (fraction of width / height)
 MIN_PX = 0.4            # vectors smaller than this many screen pixels are not drawn
+TINY_PX = 1.5           # vectors smaller than this are drawn as a flat rectangle of their colour
 
 
 class _Job:
@@ -47,6 +49,10 @@ class SceneCache(QObject):
         self._tick = QTimer(self)
         self._tick.setSingleShot(True)
         self._tick.timeout.connect(self._on_tick)
+        self._exact_now = False
+        self._refine = QTimer(self)
+        self._refine.setSingleShot(True)
+        self._refine.timeout.connect(self._on_refine)
         self._defer = QTimer(self)
         self._defer.setSingleShot(True)
         self._defer.timeout.connect(self._on_defer)
@@ -92,7 +98,7 @@ class SceneCache(QObject):
             painter.setCompositionMode(QPainter.CompositionMode_Source)
             painter.fillRect(r, Qt.transparent)
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-            for _ in iter_render_document(painter, c.doc, skip, r, MIN_PX / z0, only):
+            for _ in iter_render_document(painter, c.doc, skip, r, MIN_PX / z0, only, TINY_PX / z0):
                 pass
         painter.end()
         self.r_key = key
@@ -137,8 +143,18 @@ class SceneCache(QObject):
         if abs(c.zoom - self.r_zoom) > 1e-12:
             return False
         o = c.origin
-        need = QRectF(0, 0, size[0], size[1]).translated(self.r_origin.x() - o.x(), self.r_origin.y() - o.y())
-        return self.r_rect.contains(need)
+        dx, dy = self.r_origin.x() - o.x(), self.r_origin.y() - o.y()
+        if not self.r_rect.contains(QRectF(0, 0, size[0], size[1]).translated(dx, dy)):
+            return False
+        ax, ay = dx * dpr, dy * dpr
+        if abs(ax - round(ax)) > 1e-6 or abs(ay - round(ay)) > 1e-6:
+            # panned by a fraction of a device pixel: blitting would be off by up to half a pixel. A cheap
+            # scene is simply redrawn exactly; a heavy one keeps the shifted picture while the user is
+            # still moving and refines it once the view has settled.
+            if self.render_ms < LIGHT_MS or self._exact_now:
+                return False
+            self._refine.start(REFINE_MS)
+        return True
 
     def _blit(self, p, matrix):
         c = self.canvas
@@ -177,6 +193,10 @@ class SceneCache(QObject):
             self._sig = sig
             self._defer.start(DEBOUNCE_MS)  # the view is still changing: keep showing the old picture
 
+    def _on_refine(self):
+        self._exact_now = True
+        self.canvas.update()
+
     def _on_defer(self):
         if self.job is None and self._req is not None:
             self._start()
@@ -201,11 +221,12 @@ class SceneCache(QObject):
         j = _Job()
         j.pix, j.painter, j.rect, j.zoom, j.origin = pix, painter, rect, z, c.origin
         j.key, j.dpr, j.size, j.spent = key, dpr, size, 0.0
-        j.gen = iter_render_document(painter, c.doc, skip, cull, MIN_PX / z, only)
+        j.gen = iter_render_document(painter, c.doc, skip, cull, MIN_PX / z, only, TINY_PX / z)
         self.job = j
 
     def _cancel(self):
         self._defer.stop()
+        self._refine.stop()
         self._tick.stop()
         j, self.job = self.job, None
         if j is not None:
@@ -235,6 +256,7 @@ class SceneCache(QObject):
             self.render_ms = max(self.render_ms, 0.01)
             self.job = None
             self._sig = None
+            self._exact_now = False
         else:
             self._tick.start(0)
         return done

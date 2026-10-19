@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import math
+from time import perf_counter
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen, QTransform)
 from PySide6.QtWidgets import QInputDialog, QWidget
 
-from . import model
-from .model import Sheet, a_to_t, walk
-from .render import draw_node, render_document
-from .model import arrow_length
+from . import model, scenecache
 from .hitindex import HitIndex
-from . import scenecache
+from .model import Sheet, a_to_t, arrow_length, walk
+from .render import draw_node, render_document
 from .scenecache import SceneCache
 from .snap import EdgeIndex, SnapIndex
 
@@ -82,6 +81,7 @@ class Canvas(QWidget):
         self._live_token = 0
         self._paint_rev = 0
         self._last_key = None
+        self._idx_gen = None
         self._idx_timer = QTimer(self)
         self._idx_timer.setSingleShot(True)
         self._idx_timer.timeout.connect(self._prebuild_indexes)
@@ -127,6 +127,7 @@ class Canvas(QWidget):
         if self.live is not None and self.live.get("auto"):
             self.end_live()
         self.doc.schedule_warmup(700)
+        self._idx_gen = None              # an index being built now would already be out of date
         self.update()
 
     def _on_restored(self):
@@ -556,12 +557,44 @@ class Canvas(QWidget):
 
     # ------------------------------------------------------------ hit testing
     def _prebuild_indexes(self):
-        """While the user is idle, build the picking / snapping indexes so the next click or drag
-        on a big drawing finds them ready."""
+        """While the user is idle, build the picking / snapping indexes (in slices of a few ms) so the
+        next click or drag on a big drawing finds them ready."""
+        self._idx_gen = None
         if self.live is not None or self.doc is None or not self.isVisible():
             return
-        self.hit_index()
-        self._index(())
+        self._idx_gen = self._index_job()
+        self._idx_step()
+
+    def _index_job(self):
+        key = (self._doc_rev, model.EPOCH)
+        if self._hit_cache is None or self._hit_cache[0] != key:
+            h = HitIndex.__new__(HitIndex)
+            for _ in h.steps(self.doc):
+                yield
+            if key == (self._doc_rev, model.EPOCH):
+                self._hit_cache = (key, h)
+        if self._snap_cache is None or self._snap_cache[0] != key:
+            sx = SnapIndex.__new__(SnapIndex)
+            for _ in sx.steps(self.doc):
+                yield
+            if key == (self._doc_rev, model.EPOCH):
+                self._snap_cache = (key, sx)
+
+    def _idx_step(self):
+        gen = self._idx_gen
+        if gen is None:
+            return
+        t0 = perf_counter()
+        try:
+            while perf_counter() - t0 < 0.006:
+                next(gen)
+        except StopIteration:
+            self._idx_gen = None
+            return
+        except Exception:
+            self._idx_gen = None          # the drawing changed under us: the next request rebuilds it
+            return
+        QTimer.singleShot(6, self._idx_step)
 
     def hit_index(self):
         key = (self._doc_rev, model.EPOCH)

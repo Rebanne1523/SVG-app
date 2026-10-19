@@ -96,16 +96,24 @@ class SnapIndex:
     :meth:`view` hides the vectors being dragged."""
 
     def __init__(self, doc, exclude=(), view_rect: QRectF | None = None, page=True):
+        for _ in self.steps(doc, page):
+            pass
+
+    def steps(self, doc, page=True):
+        """Build the index; a generator so a big drawing can be indexed in slices."""
         self.leaves = leaves_ = visible_leaves(doc)
+        yield
         n = len(leaves_)
         self.index_of = {id(m): i for i, m in enumerate(leaves_)}
         pts, labs, counts, bb = [], [], [], []
-        for m in leaves_:
+        for k, m in enumerate(leaves_):
             p, lab, box = _node_points(m)
             pts.append(p)
             labs.append(lab)
             counts.append(len(p))
             bb.append(box)
+            if k % 1500 == 1499:
+                yield
         owner = np.repeat(np.arange(n, dtype=np.int64), counts) if n else np.empty(0, dtype=np.int64)
         B = np.asarray(bb, dtype=float).reshape(-1, 6)
         ar = np.arange(n, dtype=np.int64)

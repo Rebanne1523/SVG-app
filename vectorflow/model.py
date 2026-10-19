@@ -338,9 +338,12 @@ class Node:
     def clip_path(self):
         if not self.clip:
             return None
-        p = QPainterPath()
-        for sp in self.clip:
-            sp.add_to(p)
+        p = self.__dict__.get("_c_clipq")
+        if p is None:
+            p = QPainterPath()
+            for sp in self.clip:
+                sp.add_to(p)
+            self.__dict__["_c_clipq"] = p
         return p
 
     # geometry protocol -------------------------------------------------
@@ -520,6 +523,10 @@ class PathNode(Node):
         self.touch()
 
     def transform(self, m, scale_stroke=False):
+        old = None
+        if m[0] == 1.0 and m[1] == 0.0 and m[2] == 0.0 and m[3] == 1.0 and not self.clip:
+            d = self.__dict__            # a pure move: shift the cached shapes instead of rebuilding them
+            old = (d.get("_c_path"), d.get("_c_bounds"), d.get("_c_b4"), d.get("_c_shape"), d.get("_c_parts"))
         for sp in self.subpaths:
             sp.transform(m)
         if scale_stroke:
@@ -527,6 +534,19 @@ class PathNode(Node):
             self.style.width *= s
         self._transform_clip(m)
         self.touch()
+        if old is not None and old[0] is not None:
+            dx, dy = m[4], m[5]
+            d = self.__dict__
+            d["_c_path"] = old[0].translated(dx, dy)
+            if old[1] is not None:
+                d["_c_bounds"] = old[1].translated(dx, dy)
+            if old[2] is not None:
+                l, t, r, b = old[2]
+                d["_c_b4"] = (l + dx, t + dy, r + dx, b + dy)
+            if old[3] is not None:
+                d["_c_shape"] = old[3].translated(dx, dy)
+            if old[4] is not None:
+                d["_c_parts"] = [q.translated(dx, dy) for q in old[4]]
 
     def bounds(self):
         b = getattr(self, "_c_bounds", None)
@@ -967,11 +987,11 @@ def snapshot_tree(node, parent=None):
             if k in _SKIP_CLONE or k.startswith("_c_"):
                 continue
             d[k] = v
-        c.parent = parent
-        c.clip = [sp.copy() for sp in node.clip] if node.clip else None
+        c.parent = None              # snapshot trees have no parent links: they are freed by plain
+        c.clip = [sp.copy() for sp in node.clip] if node.clip else None   # reference counting, never by the GC
         c.children = [snapshot_tree(ch, c) for ch in node.children]
         return c
-    return leaf_memo(node, parent)
+    return leaf_memo(node, None)
 
 
 def leaf_memo(node, parent=None):
@@ -1650,12 +1670,29 @@ class Document(QObject):
                 n.touch()
 
     def bounds_of(self, nodes):
-        r = QRectF()
-        first = True
+        """Union of the nodes' bounds (empty / single-point ones are ignored, like QRectF.united)."""
+        inf = math.inf
+        l = t = inf
+        r = bt = -inf
+        first = None
         for n in nodes:
-            b = n.bounds()
-            if first:
-                r, first = QRectF(b), False
+            if n.is_group():
+                b = n.bounds()
+                x0, y0, x1, y1 = b.left(), b.top(), b.right(), b.bottom()
             else:
-                r = r.united(b)
-        return r
+                x0, y0, x1, y1 = box4(n)
+            if first is None:
+                first = QRectF(x0, y0, x1 - x0, y1 - y0)
+            if x1 == x0 and y1 == y0:
+                continue
+            if x0 < l:
+                l = x0
+            if y0 < t:
+                t = y0
+            if x1 > r:
+                r = x1
+            if y1 > bt:
+                bt = y1
+        if l == inf:
+            return first if first is not None else QRectF()
+        return QRectF(l, t, r - l, bt - t)
