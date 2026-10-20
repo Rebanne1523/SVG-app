@@ -412,8 +412,8 @@ def test_measure_text_rule():
     assert abs(ang((0, 0), (0, 100), 0) - 270) < 0.1
 
 
-def test_export_tiles_toggle_selection(win):
-    from PySide6.QtCore import Qt
+def test_export_tiles_click_selects_one_checkbox_and_shift_add(win):
+    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
     win.doc.new_sheet("B")
     win.doc.new_sheet("C")
@@ -421,11 +421,34 @@ def test_export_tiles_toggle_selection(win):
     dlg.resize(700, 640)
     dlg.show()
     L = dlg.list
-    for i in range(L.count()):
-        L.item(i).setSelected(False)
-    for k in (0, 1):
-        QTest.mouseClick(L.viewport(), Qt.LeftButton, Qt.NoModifier, L.visualItemRect(L.item(k)).center())
-    assert [L.item(i).isSelected() for i in range(3)] == [True, True, False]
+    state = lambda: [L.item(i).isSelected() for i in range(3)]
+    click = lambda k, mod=Qt.NoModifier, pos=None: QTest.mouseClick(
+        L.viewport(), Qt.LeftButton, mod, pos or L.visualItemRect(L.item(k)).center())
+    click(0)
+    click(1)
+    assert state() == [False, True, False]                    # a plain click leaves only that tile
+    click(2, Qt.ShiftModifier)
+    assert state() == [False, True, True]                     # Shift adds
+    r = L.visualItemRect(L.item(0))
+    click(0, pos=QPoint(r.left() + 8, r.top() + 8))
+    assert state() == [True, True, True]                      # the checkbox adds just that tile
+    click(0, pos=QPoint(r.left() + 8, r.top() + 8))
+    assert state() == [False, True, True]
+
+
+def test_export_tabs_and_name_decoration(win):
+    win.doc.new_sheet("B")
+    dlg = ExportDialog(win, win.doc, "/tmp")
+    assert dlg.mode() == "pages" and dlg.tabs.currentIndex() == 1
+    dlg.tabs.setCurrentIndex(0)
+    assert dlg.mode() == "document" and not dlg.list.isVisibleTo(dlg)
+    dlg.tabs.setCurrentIndex(1)
+    assert dlg.mode() == "pages" and dlg.list.isVisibleTo(dlg)
+    dlg.prefix_edit.setText("v2_")
+    dlg.suffix_edit.setText("_final")
+    units = dlg.chosen_units()
+    names = dlg.target_names(units)
+    assert all(n.startswith("v2_") and n.endswith("_final") for n in names)
 
 
 def test_canvas_tool_resizes_page_not_content(win):

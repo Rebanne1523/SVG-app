@@ -2,11 +2,11 @@
 to export them together as a single multi-page PDF."""
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
-                               QListWidgetItem, QPushButton, QToolButton, QVBoxLayout)
+                               QListWidgetItem, QPushButton, QTabBar, QToolButton, QVBoxLayout)
 
 from .numfield import NumField
 from .render import sheet_thumbnail
@@ -47,13 +47,23 @@ class UnitList(QListWidget):
         self.setGridSize(TILE)
         self.setResizeMode(QListView.Adjust)
         self.setMovement(QListView.Snap)
-        self.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)     # a plain click keeps only that tile
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.setWordWrap(True)
         self.setSpacing(4)
+
+    def mousePressEvent(self, e):
+        # the little box on a tile adds / removes just that tile; Shift or Ctrl+click extend the selection
+        it = self.itemAt(e.position().toPoint())
+        if it is not None and e.button() == Qt.LeftButton and not (e.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier)):
+            r = self.visualItemRect(it)
+            if QRect(r.left(), r.top(), 26, 26).contains(e.position().toPoint()):
+                it.setSelected(not it.isSelected())
+                return
+        super().mousePressEvent(e)
 
     def dropEvent(self, e):
         target = self.itemAt(e.position().toPoint())
@@ -78,6 +88,16 @@ class ExportDialog(QDialog):
         self.sel_name = sel_name or "selection"
         lay = QVBoxLayout(self)
 
+        self.tabs = QTabBar()
+        self.tabs.setExpanding(True)
+        self.tabs.setDrawBase(True)
+        self.tabs.addTab("Single file")
+        self.tabs.addTab("Batch export")
+        self.tabs.setTabToolTip(0, "The whole document as one file, or just the current selection")
+        self.tabs.setTabToolTip(1, "Several pages at once, each as its own file")
+        self.tabs.setCurrentIndex(1)
+        lay.addWidget(self.tabs)
+
         modes = QHBoxLayout()
         self.mode_group = QButtonGroup(self)
         self.mode_btns = {}
@@ -89,6 +109,7 @@ class ExportDialog(QDialog):
             self.mode_btns[key] = b
             modes.addWidget(b, 1)
         self.mode_btns["pages"].setChecked(True)
+        self.mode_btns["pages"].hide()                      # reached through the "Batch export" tab
         self.mode_btns["selection"].setEnabled(bool(doc.selection))
         if not doc.selection:
             self.mode_btns["selection"].setToolTip("Select something on the canvas first")
@@ -112,6 +133,10 @@ class ExportDialog(QDialog):
         row.addWidget(self.all_btn)
         row.addWidget(self.sep_btn)
         row.addStretch(1)
+        self.preview = QCheckBox("Preview")
+        self.preview.setChecked(True)
+        self.preview.setToolTip("Show a thumbnail of every page (turn off for very heavy documents)")
+        row.addWidget(self.preview)
         self.only_sel = QCheckBox("Export only selection")
         self.only_sel.setEnabled(bool(doc.selection))
         row.addWidget(self.only_sel)
@@ -136,6 +161,17 @@ class ExportDialog(QDialog):
         lay.addLayout(row)
 
         row = QHBoxLayout()
+        row.addWidget(QLabel("Prefix"))
+        self.prefix_edit = QLineEdit()
+        self.prefix_edit.setPlaceholderText("added before every name")
+        row.addWidget(self.prefix_edit, 1)
+        row.addWidget(QLabel("Suffix"))
+        self.suffix_edit = QLineEdit()
+        self.suffix_edit.setPlaceholderText("added after every name")
+        row.addWidget(self.suffix_edit, 1)
+        lay.addLayout(row)
+
+        row = QHBoxLayout()
         self.folder_edit = QLineEdit(folder)
         self.folder_edit.setPlaceholderText("Folder to save into")
         row.addWidget(self.folder_edit, 1)
@@ -157,6 +193,9 @@ class ExportDialog(QDialog):
         row.addWidget(self.scale)
         lay.addLayout(row)
 
+        self.overwrite = QCheckBox("Overwrite existing files without asking")
+        lay.addWidget(self.overwrite)
+
         self.ok_btn = QPushButton("Export")
         self.ok_btn.setMinimumHeight(36)
         self.ok_btn.setDefault(True)
@@ -166,11 +205,14 @@ class ExportDialog(QDialog):
         self.fmt.currentIndexChanged.connect(self._format_changed)
         self.mode_group.buttonToggled.connect(self._mode_changed)
         self.only_sel.toggled.connect(self._only_sel_toggled)
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.preview.toggled.connect(lambda _on: self.rebuild(keep_selection=True))
         self.list.itemSelectionChanged.connect(self._sync_checks)
         self.list.itemDoubleClicked.connect(lambda _i: (self.name_edit.setFocus(), self.name_edit.selectAll()))
         self.folder_edit.textChanged.connect(self._update_ok)
         self.rebuild(select_current=True)
         self._format_changed()
+        self._mode_changed()
 
     # ------------------------------------------------------------ state
     def format(self):
@@ -218,6 +260,7 @@ class ExportDialog(QDialog):
             self.mode_btns["selection"].setChecked(True)
         elif not on and self.mode() == "selection":
             self.mode_btns["pages"].setChecked(True)
+        self.mode_btns["pages"].hide()                      # reached through the "Batch export" tab
 
     def _format_changed(self):
         png = self.format() == "png"
@@ -230,6 +273,13 @@ class ExportDialog(QDialog):
 
     def _mode_changed(self, *_):
         m = self.mode()
+        self.tabs.blockSignals(True)
+        self.tabs.setCurrentIndex(1 if m == "pages" else 0)
+        self.tabs.blockSignals(False)
+        for key in ("document", "selection"):
+            self.mode_btns[key].setVisible(m != "pages")
+        for w in (self.list, self.all_btn, self.sep_btn, self.preview):
+            w.setVisible(m == "pages")
         self.list.setEnabled(m == "pages")
         self.sep_btn.setEnabled(m == "pages")
         self.all_btn.setEnabled(m == "pages")
@@ -239,6 +289,14 @@ class ExportDialog(QDialog):
         self._update_hint()
         self._update_ok()
         self._refresh_name()
+
+    def _tab_changed(self, i):
+        if i == 1:
+            self.mode_btns["pages"].setChecked(True)
+        else:
+            sel = self.mode_btns["selection"]
+            (sel if sel.isEnabled() and self.doc.selection and self.only_sel.isChecked() else
+             self.mode_btns["document"]).setChecked(True)
 
     def _update_hint(self):
         m = self.mode()
@@ -316,27 +374,39 @@ class ExportDialog(QDialog):
     def target_names(self, units):
         """Custom names matching ``chosen_units()`` / the selection export ("" = default)."""
         if self.mode() == "selection":
-            return [self.names.get("sel", "")]
+            return [self._decorated(self.names.get("sel", ""), self.sel_name)]
         if self.mode() == "document":
-            return [self.names.get("doc", "")] if self.format() == "pdf" else [""] * len(units)
-        return [self.names.get(id(u), "") for u in units]
+            if self.format() == "pdf":
+                return [self._decorated(self.names.get("doc", ""), self._default_name("doc"))]
+            return [self._decorated("", u[0].name) for u in units]
+        return [self._decorated(self.names.get(id(u), ""), u[0].name) for u in units]
+
+    def _decorated(self, custom, default):
+        """Prefix and suffix around the file name; an untouched name stays "" (= the default)."""
+        pre, suf = self.prefix_edit.text().strip(), self.suffix_edit.text().strip()
+        if not (pre or suf):
+            return custom
+        return f"{pre}{custom or default}{suf}"
 
     def _update_ok(self, *_):
         ok = bool(self.folder()) and (self.mode() != "pages" or bool(self.list.selectedItems()))
         self.ok_btn.setEnabled(ok)
 
     # ------------------------------------------------------------ tiles
-    def rebuild(self, select_current=False, keep=None):
+    def rebuild(self, select_current=False, keep=None, keep_selection=False):
         cur = self.doc.current_sheet()
+        kept = {it.data(Qt.UserRole) for it in self.list.selectedItems()} if keep_selection else set()
+        shown = self.preview.isChecked()
+        self.list.setGridSize(TILE if shown else QSize(TILE.width(), 56))
         self.list.clear()
         for unit in self.units:
-            it = QListWidgetItem(unit_icon(unit), self._label(unit))
+            it = QListWidgetItem(unit_icon(unit) if shown else QIcon(), self._label(unit))
             it.setData(Qt.UserRole, id(unit))
             it.setTextAlignment(Qt.AlignHCenter)
             it.setToolTip("\n".join(s.name for s in unit))
             it.setFlags(it.flags() & ~Qt.ItemIsUserCheckable)
             self.list.addItem(it)
-            if (select_current and cur in unit) or (keep is not None and unit is keep):
+            if (select_current and cur in unit) or (keep is not None and unit is keep) or id(unit) in kept:
                 it.setSelected(True)
         self._sync_checks()
 

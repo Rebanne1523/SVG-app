@@ -98,13 +98,41 @@ def apply_dark_theme(app: QApplication):
     p.setColor(QPalette.Disabled, QPalette.WindowText, QColor(120, 120, 120))
     app.setPalette(p)
     app.setStyleSheet("""
-        QToolTip { color: #eee; background: #1e1e1e; border: 1px solid #555; padding: 3px; }
-        QToolBar { spacing: 3px; padding: 2px; border: 0; }
-        QToolButton:checked { background: #2c6fb5; border-radius: 4px; }
-        QToolButton:hover { background: #4a4b50; border-radius: 4px; }
-        QDockWidget::title { padding: 6px; background: #3a3b3f; }
-        QTreeView::item { padding: 2px 0; }
-        QTreeView::item:selected { background: #2c6fb5; }
+        QToolTip { color: #eee; background: #1e1e1e; border: 1px solid #555; padding: 4px 6px; }
+        QToolBar { spacing: 3px; padding: 3px; border: 0; }
+        QToolButton { border-radius: 5px; padding: 3px; }
+        QToolButton:checked { background: #2c6fb5; }
+        QToolButton:hover { background: #4a4b50; }
+        QToolButton:checked:hover { background: #3a80c9; }
+        QMenuBar::item { padding: 4px 9px; border-radius: 4px; }
+        QMenuBar::item:selected { background: #4a4b50; }
+        QMenu { padding: 4px; }
+        QMenu::item { padding: 5px 22px 5px 18px; border-radius: 4px; }
+        QMenu::item:selected { background: #2c6fb5; }
+        QMenu::separator { height: 1px; background: #4a4b50; margin: 4px 8px; }
+        QDockWidget::title { padding: 7px 8px; background: #3a3b3f; font-weight: bold; }
+        QTreeView, QListView, QListWidget { border: 1px solid #3f4044; border-radius: 4px; }
+        QTreeView::item { padding: 3px 0; }
+        QTreeView::item:hover, QListView::item:hover { background: #3a3b3f; }
+        QTreeView::item:selected, QListView::item:selected { background: #2c6fb5; color: #fff; }
+        QPushButton { padding: 5px 14px; border: 1px solid #4a4b50; border-radius: 5px; background: #3e3f43; }
+        QPushButton:hover { background: #4a4b50; }
+        QPushButton:checked { background: #2c6fb5; border-color: #2c6fb5; color: #fff; }
+        QPushButton:disabled { color: #787878; background: #38393c; }
+        QPushButton:default { border-color: #2c6fb5; }
+        QLineEdit, QAbstractSpinBox, QComboBox { padding: 4px 6px; border: 1px solid #4a4b50; border-radius: 4px;
+                                                 background: #242527; }
+        QLineEdit:focus, QAbstractSpinBox:focus, QComboBox:focus { border-color: #2c6fb5; }
+        QTabBar::tab { padding: 7px 16px; background: #3a3b3f; border: 0; border-bottom: 2px solid transparent; }
+        QTabBar::tab:selected { background: #46474c; border-bottom: 2px solid #2c6fb5; color: #fff; }
+        QTabBar::tab:hover:!selected { background: #424348; }
+        QScrollBar:vertical { width: 11px; background: transparent; margin: 0; }
+        QScrollBar:horizontal { height: 11px; background: transparent; margin: 0; }
+        QScrollBar::handle { background: #5a5b60; border-radius: 4px; min-height: 28px; min-width: 28px; }
+        QScrollBar::handle:hover { background: #75767c; }
+        QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+        QStatusBar { border-top: 1px solid #3f4044; }
+        QCheckBox { spacing: 7px; }
     """)
 
 
@@ -595,7 +623,7 @@ class MainWindow(QMainWindow):
             paths = plan_unit_paths(units, folder, ext, dlg.target_names(units))
             job = lambda: export_units(self.doc, units, paths, fmt, scale, bg)
         clash = [os.path.basename(p) for p in paths if os.path.exists(p)]
-        if clash:
+        if clash and not dlg.overwrite.isChecked():
             r = QMessageBox.question(self, "Overwrite?", "These files already exist and will be replaced:\n\n"
                                      + "\n".join(clash[:15]), QMessageBox.Yes | QMessageBox.Cancel)
             if r != QMessageBox.Yes:
