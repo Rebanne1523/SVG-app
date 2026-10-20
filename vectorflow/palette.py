@@ -58,6 +58,23 @@ class Strip(QWidget):
                 p.fillRect(r, qcolor(c))
         p.setPen(QPen(QColor(0, 0, 0, 90)))
         p.drawRect(0, 0, self.width() - 1, self.height() - 1)
+        k = self._index_of(self.current)
+        if k is not None:                       # a dot marks the swatch that is currently selected
+            cx, cy = (k + 0.5) * w, self.height() / 2.0
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(0, 0, 0, 220), 3.0))
+            p.drawEllipse(QRectF(cx - 3, cy - 3, 6, 6))
+            p.setPen(QPen(QColor(255, 255, 255), 1.5))
+            p.drawEllipse(QRectF(cx - 3, cy - 3, 6, 6))
+
+    def _index_of(self, c):
+        if c is None:
+            return 0
+        for i, e in enumerate(self.entries):
+            if e is not None and tuple(e[:3]) == tuple(c[:3]):
+                return i
+        return None
 
     def _at(self, x):
         i = int(x / self._w())
@@ -180,6 +197,9 @@ class PaletteBar:
         for ch, (row, chip, strip) in self.rows.items():
             row.setVisible(ch in show)
             chip.set_color(cur[ch])
+            if strip.current != cur[ch]:
+                strip.current = cur[ch]
+                strip.update()
             chip.text = ("Fill" if ch == "fill" else "Stroke") if len(show) == 2 else "Colour"
             chip.update()
 

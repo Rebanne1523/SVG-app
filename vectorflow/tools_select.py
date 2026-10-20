@@ -5,12 +5,13 @@ import math
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QWidget
 
 from . import affine, model
 from .geometry import (bez, constrain_angle_projected, dist, nearest_on_polyline, split_cubic)
 from .model import Anchor, a_to_t, fresh_copy, leaves
+from .atable import AnchorTable, anchor_table  # noqa: F401
 from .tools_base import Tool, rotate_cursor
 
 SEL = QColor(0, 140, 255)
@@ -444,7 +445,7 @@ class SelectTool(Tool):
             self.canvas.edit_node_text(node)
         elif node.kind == "path" and len(node.subpaths) > 1:
             self.doc.enter_compound(node)
-            self.say("Inside the compound path: each sub-path is now its own path (see the Inside tab in Layers).")
+            self.say("Inside the compound path: pick a sub-path in the Inside tab of Layers to highlight it and edit it with the Direct tool.")
 
     def key_press(self, e):
         key = e.key()
@@ -511,46 +512,6 @@ class SelectTool(Tool):
 MARKER_CAP = 600          # anchors drawn at once by the Direct tool (the rest only near the cursor)
 
 
-class AnchorTable:
-    """Numpy view of every anchor of a path node (cached on the node, dropped on touch())."""
-    __slots__ = ("flat", "loc", "X", "Y", "IX", "IY", "OX", "OY", "nxt", "_pos")
-
-    def __init__(self, node):
-        flat, loc, nxt = [], [], []
-        base = 0
-        for sp in node.subpaths:
-            cnt = len(sp.anchors)
-            for i, a in enumerate(sp.anchors):
-                flat.append((sp, a))
-                loc.append(i)
-                nxt.append(base + i + 1 if i + 1 < cnt else (base if sp.closed and cnt > 1 else -1))
-            base += cnt
-        self.flat, self.loc = flat, loc
-        n = len(flat)
-        self.nxt = np.asarray(nxt, dtype=np.int64)
-        f = np.fromiter
-        self.X = f((a.x for _, a in flat), float, n)
-        self.Y = f((a.y for _, a in flat), float, n)
-        self.IX = f((a.ix for _, a in flat), float, n)
-        self.IY = f((a.iy for _, a in flat), float, n)
-        self.OX = f((a.ox for _, a in flat), float, n)
-        self.OY = f((a.oy for _, a in flat), float, n)
-        self._pos = None
-
-    def position_of(self, anchor):
-        """(index in the flat table) of an anchor object."""
-        if self._pos is None:
-            self._pos = {id(a): i for i, (_, a) in enumerate(self.flat)}
-        return self._pos.get(id(anchor))
-
-
-def anchor_table(node):
-    t = node.__dict__.get("_c_atab")
-    if t is None:
-        t = node.__dict__["_c_atab"] = AnchorTable(node)
-    return t
-
-
 # =============================================================================================
 def segment_hit(a0: Anchor, a1: Anchor, p, samples=40):
     """(distance, t) for the closest point on the segment a0->a1 to p."""
@@ -607,11 +568,14 @@ class DirectTool(Tool):
     label = "Direct Selection"
     shortcut = "A"
     hint = ("Click a path to show its points. Drag points/handles/segments. Double-click a point to toggle "
-            "smooth/corner, double-click a segment to add a point. Shift = 45° steps, Alt = break handle.")
+            "smooth/corner (so does a wheel click on the selected points), double-click or Shift+click a segment "
+            "to add a point, drag a segment to bend it. B = snap to vertices. Shift = 45° steps, Alt = break handle.")
 
     def __init__(self, canvas):
         super().__init__(canvas)
         self.scroll_mode = "path"   # "path": follow the path, "area": nearby points
+        self.vertex_snap = False    # B: snap moved points to other points (until one is hit, or B again)
+        self._snapped = False
         self.reset()
 
     def options_widget(self, parent=None):
@@ -680,6 +644,17 @@ class DirectTool(Tool):
     def is_sel(self, a):
         return any(x is a for _, x in self.sel)
 
+    def focus_mask(self, n, t):
+        """While looking inside a compound path only the focused sub-path is editable: a boolean mask
+        over the anchor table, or None when everything is."""
+        f = self.doc.inside_focus
+        if f is None or len(n.subpaths) < 2:
+            return None
+        for i, sp in enumerate(n.subpaths):
+            if sp is f:
+                return t.sub_ids(n) == i
+        return None
+
     def hit_anchor(self, vp):
         c = self.canvas
         z, o = c.zoom, c.origin
@@ -690,6 +665,9 @@ class DirectTool(Tool):
             if not t.flat:
                 continue
             d = np.hypot(t.X * z + o.x() - vp[0], t.Y * z + o.y() - vp[1])
+            fm = self.focus_mask(n, t)
+            if fm is not None:
+                d = np.where(fm, d, np.inf)
             k = int(np.argmin(d))
             if d[k] <= bd:
                 bd = float(d[k])
@@ -730,7 +708,11 @@ class DirectTool(Tool):
         best = None
         for n in self.paths():
             t = anchor_table(n)
-            idx = np.flatnonzero(t.nxt >= 0)
+            ok = t.nxt >= 0
+            fm = self.focus_mask(n, t)
+            if fm is not None:
+                ok &= fm
+            idx = np.flatnonzero(ok)
             if idx.size == 0:
                 continue
             nx = t.nxt[idx]
@@ -778,6 +760,19 @@ class DirectTool(Tool):
             self.orig = [(x, y, (y.x, y.y, y.ix, y.iy, y.ox, y.oy)) for x, y in self.sel]
             return
         seg = self.hit_segment(ev.p) if self.paths() else None
+        if seg is not None and ev.shift:
+            _, n, sp, i, t = seg
+            self.doc.begin_edit()
+            new = split_segment(sp, i, t)
+            n.touch()
+            self.sel = [(n, new)]
+            self.mode = "newpoint"
+            self.drag_handle = (n, sp, new, "out")
+            self.orig = [(n, new, (new.x, new.y, new.ix, new.iy, new.ox, new.oy))]
+            self.primary = (n, new)
+            self.dragging = True            # the point exists already: always commit it
+            self._pulled = False
+            return
         if seg is not None:
             _, n, sp, i, t = seg
             self.mode = "segment"
@@ -837,12 +832,11 @@ class DirectTool(Tool):
                 target = constrain_angle_projected((o[0], o[1]), (target[0], target[1]), 45.0)
                 self.canvas.clear_snap()
             else:
-                target, _ = self.canvas.snap_point(target, exclude)
+                target = self._snap_target(target, exclude, {id(y) for _, y in self.sel})
             dx, dy = target[0] - o[0], target[1] - o[1]
             for n, a, o in self.orig:
                 a.x, a.y, a.ix, a.iy, a.ox, a.oy = (o[0] + dx, o[1] + dy, o[2] + dx, o[3] + dy, o[4] + dx, o[5] + dy)
-            for n in {id(n): n for n, _ in self.sel}.values():
-                n.touch()
+            self._touch_points(self.sel)
             self.say(f"Move point  Δx {dx:.2f}  Δy {dy:.2f}")
         elif self.mode == "handle":
             n, sp, a, which = self.drag_handle
@@ -858,9 +852,87 @@ class DirectTool(Tool):
                 a.set_out(target[0], target[1])
             else:
                 a.set_in(target[0], target[1])
-            n.touch()
+            n.touch_points([a])
+        elif self.mode == "newpoint":
+            n, sp, a, _ = self.drag_handle
+            if not self._pulled and dist(ev.vp, self.start_v) < 3:
+                return
+            self._pulled = True
+            target = ev.p
+            if ev.shift:
+                target = constrain_angle_projected(a.p, target, 45.0)
+                self.canvas.clear_snap()
+            else:
+                target = self._snap_target(target, exclude, {id(a)})
+            # pulling out of a fresh point makes a smooth Bezier point: the other handle mirrors it
+            a.ox, a.oy = target
+            a.ix, a.iy = 2 * a.x - target[0], 2 * a.y - target[1]
+            a.smooth = True
+            n.touch_points([a])
         elif self.mode == "segment":
             self._drag_segment(ev)
+
+    @staticmethod
+    def _touch_points(pairs):
+        by = {}
+        for n, a in pairs:
+            by.setdefault(id(n), (n, []))[1].append(a)
+        for n, anchors in by.values():
+            n.touch_points(anchors)
+
+    def _snap_target(self, target, exclude, moving):
+        """Normal snapping, or (after B) snapping to the vertices of every path, own ones included."""
+        c = self.canvas
+        if self.vertex_snap:
+            best = self._nearest_vertex(target, moving, exclude)
+            if best is not None:
+                c.guides = []
+                c.snap_marker = (best, "Point")
+                self._snapped = True
+                return best
+        self._snapped = False
+        t, _ = c.snap_point(target, exclude)
+        return t
+
+    def _nearest_vertex(self, p, moving, exclude):
+        thr = 7.0 / self.canvas.zoom           # "really close": a few screen pixels
+        best, bd = None, thr
+        for n in self.paths():
+            t = anchor_table(n)
+            if not t.flat:
+                continue
+            d = np.hypot(t.X - p[0], t.Y - p[1])
+            for k in np.flatnonzero(d <= bd):
+                if id(t.flat[k][1]) in moving:
+                    continue
+                if d[k] <= bd:
+                    bd, best = float(d[k]), (float(t.X[k]), float(t.Y[k]))
+        hit = self.canvas._index(exclude).nearest_point(p, thr)
+        if hit is not None and hit[1] in ("Anchor", "Corner", "Sheet corner"):
+            q = hit[0]
+            dq = math.hypot(q[0] - p[0], q[1] - p[1])
+            if dq <= bd:
+                bd, best = dq, q
+        return best
+
+    def middle_click(self, ev):
+        """Wheel click: flip every selected point between corner and smooth (Bezier)."""
+        if not self.sel or self.mode is not None:
+            return
+        with self.doc.edit():
+            for n, a in self.sel:
+                t = anchor_table(n)
+                k = t.position_of(a)
+                if k is None:
+                    continue
+                sp = t.flat[k][0]
+                if a.has_in() or a.has_out():
+                    a.collapse()
+                else:
+                    make_smooth(sp, sp.anchors.index(a))
+            for n in {id(n): n for n, _ in self.sel}.values():
+                n.touch()
+        self.say("Points flipped between corner and smooth")
 
     def _drag_segment(self, ev):
         n, sp, i, t = self.seg
@@ -868,15 +940,14 @@ class DirectTool(Tool):
         self._restore_orig()
         a0 = sp.anchors[i]
         a1 = sp.anchors[(i + 1) % len(sp.anchors)]
-        if not a0.has_out() and not a1.has_in():
-            for _, a, o in self.orig:
-                a.x, a.y, a.ix, a.iy, a.ox, a.oy = (o[0] + dx, o[1] + dy, o[2] + dx, o[3] + dy, o[4] + dx, o[5] + dy)
-        else:
-            tt = max(0.15, min(0.85, t))
-            w = 1.0 / (3.0 * tt * (1.0 - tt))
-            a0.set_out(a0.ox + dx * w, a0.oy + dy * w)
-            a1.set_in(a1.ix + dx * w, a1.iy + dy * w)
-        n.touch()
+        # a straight segment is a cubic with its handles at the thirds; dragging it bends both handles at once
+        o0 = a0.hout if a0.has_out() else (a0.x + (a1.x - a0.x) / 3.0, a0.y + (a1.y - a0.y) / 3.0)
+        i1 = a1.hin if a1.has_in() else (a1.x + (a0.x - a1.x) / 3.0, a1.y + (a0.y - a1.y) / 3.0)
+        tt = max(0.15, min(0.85, t))
+        w = 1.0 / (3.0 * tt * (1.0 - tt))
+        a0.set_out(o0[0] + dx * w, o0[1] + dy * w)
+        a1.set_in(i1[0] + dx * w, i1[1] + dy * w)
+        n.touch_points([a0, a1])
 
     def release(self, ev):
         if ev.button != Qt.LeftButton:
@@ -895,6 +966,8 @@ class DirectTool(Tool):
                 found = []
                 for n in self.paths():
                     for sp in n.subpaths:
+                        if self.doc.inside_focus is not None and len(n.subpaths) > 1 and sp is not self.doc.inside_focus:
+                            continue
                         for a in sp.anchors:
                             if rect.contains(QPointF(a.x, a.y)):
                                 found.append((n, a))
@@ -907,11 +980,15 @@ class DirectTool(Tool):
                 nodes = [n for n in self.canvas.nodes_in_rect(rect, "item") if n.kind == "path"]
                 self.doc.set_selection(nodes)
             return
-        if mode in ("anchors", "handle", "segment"):
+        if mode in ("anchors", "handle", "segment", "newpoint"):
             if self.dragging:
-                self.doc.end_edit(True)
+                self.doc.end_edit(True, structure=(mode == "newpoint"))
             else:
                 self.doc.cancel_edit()
+            if self.vertex_snap and self._snapped:
+                self.vertex_snap = False                 # one vertex snap per B
+                self.say("Vertex snap off")
+            self._snapped = False
             self.dragging = False
             self.canvas.clear_snap()
             self.say("")
@@ -1022,13 +1099,23 @@ class DirectTool(Tool):
                     a.move_to(a.x + d[0], a.y + d[1])
                     n.touch()
             return True
-        if e.key() == Qt.Key_Escape and self.mode in ("anchors", "handle", "segment"):
+        if e.key() == Qt.Key_B and not (e.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            self.vertex_snap = not self.vertex_snap
+            self._snapped = False
+            self.say("Vertex snap ON: drag a point close to another point (B again to cancel)"
+                     if self.vertex_snap else "Vertex snap off")
+            return True
+        if e.key() == Qt.Key_Escape and self.mode in ("anchors", "handle", "segment", "newpoint"):
             if self.orig:
                 self._restore_orig()
                 for n in {id(n): n for n, _, _ in self.orig}.values():
                     n.touch()
-            self.doc.cancel_edit()
+            if self.mode == "newpoint":
+                self.doc.end_edit(True, structure=True)       # the point stays, just without the pulled handles
+            else:
+                self.doc.cancel_edit()
             self.mode = None
+            self.dragging = False
             return True
         if e.key() == Qt.Key_Escape and self.sel:
             self.sel = []
@@ -1072,6 +1159,9 @@ class DirectTool(Tool):
                 continue
             vx, vy = t.X * z + o.x(), t.Y * z + o.y()
             show = (vx >= -8) & (vx <= W + 8) & (vy >= -8) & (vy <= H + 8)
+            fm = self.focus_mask(n, t)
+            if fm is not None:
+                show &= fm
             idx = np.flatnonzero(show)
             if idx.size > MARKER_CAP:
                 # far too many to draw (or to use): keep the ones around the cursor and the selected ones
@@ -1083,12 +1173,18 @@ class DirectTool(Tool):
                     if k is not None:
                         keep[k] = True
                 idx = np.flatnonzero(show & keep)[:MARKER_CAP]
+            # markers are drawn in four batches (selected / not, round / square) instead of one call each
+            groups = {}
+            flat = t.flat
             for k in idx:
-                a = t.flat[k][1]
-                selected = id(a) in sel_ids
-                p.setBrush(SEL if selected else white)
-                r = QRectF(vx[k] - 3.5, vy[k] - 3.5, 7, 7)
-                if a.smooth:
-                    p.drawEllipse(r)
-                else:
-                    p.drawRect(r)
+                a = flat[k][1]
+                groups.setdefault((id(a) in sel_ids, a.smooth), []).append(QPointF(vx[k], vy[k]))
+            for (selected, smooth), pts in groups.items():
+                cap = Qt.RoundCap if smooth else Qt.SquareCap
+                poly = QPolygonF(pts)
+                pen = QPen(SEL, 7.5 if selected else 8.0, Qt.SolidLine, cap)
+                p.setPen(pen)
+                p.drawPoints(poly)
+                if not selected:
+                    p.setPen(QPen(white, 5.2, Qt.SolidLine, cap))
+                    p.drawPoints(poly)

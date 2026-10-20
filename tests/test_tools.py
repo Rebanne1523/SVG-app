@@ -179,8 +179,8 @@ def test_shortcuts(win, qapp):
     from PySide6.QtTest import QTest
     c = win.canvas
     c.setFocus()
-    for key, name in [(Qt.Key_P, "pen"), (Qt.Key_V, "select"), (Qt.Key_A, "direct"), (Qt.Key_G, "bucket"),
-                      (Qt.Key_S, "measure"), (Qt.Key_U, "rect"), (Qt.Key_T, "text"), (Qt.Key_H, "hand")]:
+    for key, name in [(Qt.Key_P, "pen"), (Qt.Key_V, "select"), (Qt.Key_A, "direct"), (Qt.Key_U, "bucket"),
+                      (Qt.Key_S, "measure"), (Qt.Key_G, "rect"), (Qt.Key_N, "pencil"), (Qt.Key_T, "text"), (Qt.Key_H, "hand")]:
         QTest.keyClick(c, key)
         assert c.tool.name == name
 

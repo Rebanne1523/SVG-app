@@ -37,12 +37,12 @@ SHORTCUTS_HELP = """
 <h3>Tools (same letters as Photoshop where possible)</h3>
 <table cellpadding=3>
 <tr><td><b>V</b></td><td>Move / Select &mdash; drag handles to scale, hover just outside a corner to rotate</td></tr>
-<tr><td><b>A</b></td><td>Direct Selection &mdash; edit points, handles and segments</td></tr>
+<tr><td><b>A</b></td><td>Direct Selection &mdash; edit points, handles and segments; Shift+click a segment adds a point, wheel click flips corner/smooth, <b>B</b> snaps to vertices</td></tr>
 <tr><td><b>P</b></td><td>Pen &mdash; click = corner, click-drag = curve, Enter = finish</td></tr>
-<tr><td><b>B</b></td><td>Pencil (freehand, smoothed)</td></tr>
-<tr><td><b>U</b> / <b>E</b> / <b>L</b></td><td>Rectangle / Ellipse / Line</td></tr>
+<tr><td><b>N</b></td><td>Pencil (freehand, smoothed)</td></tr>
+<tr><td><b>G</b> / <b>E</b> / <b>L</b></td><td>Rectangle / Ellipse / Line</td></tr>
 <tr><td><b>T</b></td><td>Text</td></tr>
-<tr><td><b>G</b></td><td>Paint Bucket (Alt+click recolours a shape)</td></tr>
+<tr><td><b>U</b></td><td>Paint Bucket (Alt+click recolours a shape)</td></tr>
 <tr><td><b>I</b></td><td>Measure &mdash; A, B, offset, type the value; scroll flips the arrow</td></tr>
 <tr><td><b>H</b> / <b>Z</b></td><td>Hand / Zoom (Space = temporary hand)</td></tr>
 </table>
@@ -192,7 +192,8 @@ class MainWindow(QMainWindow):
             c.register_tool(t)
         c.tools["ellipse"].shortcut = "E"
         c.tools["line"].shortcut = "L"
-        c.tools["rect"].shortcut = "U"
+        c.tools["rect"].shortcut = "G"
+        c.tools["pencil"].shortcut = "N"
 
     def _build_bars(self):
         # toolbox
@@ -333,6 +334,17 @@ class MainWindow(QMainWindow):
         self.snap_act = self._act(v, "&Snapping", self._set_snap, "Ctrl+Shift+;", checkable=True)
         self.snap_act.setChecked(True)
         v.addAction(self.layers_dock.toggleViewAction())
+        v.addSeparator()
+        rm = v.addMenu("&Renderer (restart to apply)")
+        grp = QActionGroup(self)
+        from . import canvas as _cv
+        for key, label in (("software", "Software (CPU, default)"),
+                           ("opengl", "OpenGL (GPU, experimental)")):
+            a = rm.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(_cv.BACKEND == key)
+            a.triggered.connect(lambda checked=False, k=key: self._set_renderer(k))
+            grp.addAction(a)
 
         sm = mb.addMenu("S&heets")
         self._act(sm, "&Add blank sheet", self.sheets_panel.add_sheet)
@@ -414,6 +426,17 @@ class MainWindow(QMainWindow):
         name = os.path.basename(self.doc.path) if self.doc.path else (
             os.path.basename(self.doc.source) if self.doc.source else "Untitled")
         self.setWindowTitle(f"{'*' if self.doc.modified else ''}{name} — VectorFlow")
+
+    def _set_renderer(self, key):
+        from . import canvas as _cv
+        if key == _cv.BACKEND and not os.environ.get("VF_RENDERER"):
+            return
+        self.settings().setValue("render/backend", key)
+        self.settings().setValue("render/pending", False)
+        QMessageBox.information(self, "Renderer", "Restart VectorFlow to use the "
+                                f"{'OpenGL (GPU)' if key == 'opengl' else 'software (CPU)'} renderer.\n\n"
+                                "OpenGL is experimental: if the canvas stays blank or the app does not start, "
+                                "it goes back to software on the next launch (or run with VF_RENDERER=software).")
 
     # ------------------------------------------------------------ remembered folder
     @staticmethod
@@ -766,6 +789,12 @@ def main(argv=None):
     if os.environ.get("QT_QPA_PLATFORM", "") not in ("offscreen", "minimal") \
             and os.environ.get("VECTORFLOW_QT_DIALOGS") != "1":
         os.environ["QT_QPA_PLATFORMTHEME"] = "xdgdesktopportal"
+    from . import canvas as _cv
+    if _cv.BACKEND == "opengl":
+        from PySide6.QtGui import QSurfaceFormat
+        fmt = QSurfaceFormat()
+        fmt.setSamples(4)                   # the OpenGL paint engine needs multisampling to anti-alias
+        QSurfaceFormat.setDefaultFormat(fmt)
     app = QApplication(argv)
     GcPolicy(app)
     app.setApplicationName("VectorFlow")
@@ -775,4 +804,6 @@ def main(argv=None):
     path = next((a for a in argv[1:] if not a.startswith("-")), None)
     w = MainWindow(path)
     w.show()
+    if _cv.BACKEND_NOTE:
+        w.statusBar().showMessage(_cv.BACKEND_NOTE, 20000)
     return app.exec()

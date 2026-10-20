@@ -1,4 +1,4 @@
-"""Drawing tools: Pen (P), Pencil (B), Rectangle / Ellipse / Line (U) and Text (T)."""
+"""Drawing tools: Pen (P), Pencil (N), Rectangle / Ellipse / Line (G) and Text (T)."""
 from __future__ import annotations
 
 import math
@@ -221,7 +221,7 @@ class PenTool(Tool):
 class PencilTool(Tool):
     name = "pencil"
     label = "Pencil (freehand)"
-    shortcut = "B"
+    shortcut = "N"
     hint = "Drag to draw a freehand line; it is smoothed into a Bezier curve when you release."
 
     def __init__(self, canvas):
@@ -310,8 +310,8 @@ class ShapeTool(Tool):
         self.radius = 0.0
         self.name = {"rect": "rect", "ellipse": "ellipse", "line": "line"}[kind]
         self.label = {"rect": "Rectangle", "ellipse": "Ellipse", "line": "Line"}[kind]
-        self.shortcut = {"rect": "U", "ellipse": "", "line": "L"}[kind]
-        self.hint = {"rect": "Drag to draw. Shift = square, Alt = from centre. Shift+U cycles shape tools.",
+        self.shortcut = {"rect": "G", "ellipse": "", "line": "L"}[kind]
+        self.hint = {"rect": "Drag to draw. Shift = square, Alt = from centre. Shift+G cycles shape tools.",
                      "ellipse": "Drag to draw. Shift = circle, Alt = from centre.",
                      "line": "Drag to draw. Shift = 45° steps, Alt = from centre."}[kind]
         self.reset()

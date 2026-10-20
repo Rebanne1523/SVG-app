@@ -49,3 +49,22 @@ def test_looks_closed_but_has_tiny_gaps():
     assert res.polygon is not None
     assert res.polygon.area < 200 * 200 * 1.1           # not the 400x400 outer area
     assert res.polygon.contains(__import__("shapely.geometry", fromlist=["Point"]).Point(200, 200))
+
+
+def test_page_edge_closes_a_shape_that_leaves_the_sheet():
+    from vectorflow.model import Document, Sheet
+    from vectorflow.fill import fill_at
+    import math
+    d = Document()
+    sh = d.sheets()[0]
+    # half a circle poking out through the left edge of the sheet: only its arc is drawn
+    cx, cy, r = sh.x, sh.y + 100, 60
+    pts = [(cx + r * math.cos(a / 20 * math.pi - math.pi / 2), cy + r * math.sin(a / 20 * math.pi - math.pi / 2))
+           for a in range(0, 21)]
+    from vectorflow.model import PathNode, SubPath, Anchor, Style
+    n = PathNode([SubPath([Anchor(x, y) for x, y in pts], False)], Style(fill=None, stroke=(0, 0, 0, 255), width=1.0), "arc")
+    d.active_container().add(n)
+    node, res = fill_at(d, (sh.x + 20, cy), (255, 0, 0, 255))
+    assert node is not None, res.error
+    b = node.bounds()
+    assert b.left() >= sh.x - 2 and b.right() <= sh.x + r + 2

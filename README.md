@@ -4,7 +4,7 @@ Editor de vectores para Linux (pensado para CachyOS/Arch; Qt6 + Python) hecho pa
 
 - **Capas y carpetas fáciles**: una sola lista, arrastrar y soltar, indicador claro de dónde cae cada cosa.
 - **Abre cualquier SVG y PDF** (los PDF se convierten a vectores editables) y guarda **SVG compatible con Inkscape** (las capas se conservan).
-- **Controles tipo Photoshop**: atajos de herramientas (`V`, `A`, `P`, `T`, `G`...), escalar/rotar con asas, `Shift` para 45°/proporcional, `Alt` para copiar o desde el centro.
+- **Controles tipo Photoshop**: atajos de herramientas (`V`, `A`, `P`, `T`, `U`...), escalar/rotar con asas, `Shift` para 45°/proporcional, `Alt` para copiar o desde el centro.
 - **Snapping** al mover objetos enteros, puntos, escalar y rotar.
 - **Cubo de pintura inteligente**: trabaja sobre la geometría vectorial (no sobre lo que se ve) y cierra huecos pequeños.
 - **Líneas de medición** con snap a puntos y bordes, forma de U / L / recta, flechas configurables y texto editable.
@@ -75,7 +75,7 @@ Abrir archivos directamente: `./run.sh plano.pdf detalle.pdf` o `vectorflow proy
 - `Ctrl+J` **combina** varios trazos en un solo trazo compuesto (como una letra con agujeros: cada forma queda como subtrazo y los huecos funcionan).
 - `Ctrl+Shift+J` **separa** un trazo compuesto en un trazo por cada subtrazo.
 
-- **Entrar en un compuesto:** doble clic sobre él (en el lienzo o en el panel de capas). Se abre en una carpeta de trazos independientes, cada uno con su propio relleno y trazo, y el panel de capas muestra una pestaña **Inside: …**. Ojo: al separarse, los huecos dejan de serlo (un anillo pasa a ser dos círculos); `Ctrl+Z` lo deshace.
+- **Mirar dentro de un compuesto:** doble clic sobre él (en el lienzo o en el panel de capas). No cambia nada del dibujo: el panel de capas muestra una pestaña **Inside: …** con sus subtrazados; al elegir uno se resalta en naranja y la Selección directa (`A`) solo edita ese. Para tener colores distintos usa grupos, o `Ctrl+Shift+J` para separarlo de verdad.
 
 ### Colores rápidos (barra de abajo)
 
@@ -104,12 +104,12 @@ En la barra de opciones de **Mover** puedes elegir si el clic selecciona el *ele
 | Tecla | Herramienta | Notas |
 |---|---|---|
 | `V` | Mover / Seleccionar | Arrastrar = mover. Asas = escalar. **Pasa el ratón justo fuera de una esquina** y el cursor cambia a rotar. |
-| `A` | Selección directa | Puntos, tiradores y segmentos. Doble clic en un punto = suave/esquina; doble clic en un segmento = añadir punto; `Supr` borra puntos. **Rueda sobre un punto**: ver abajo. |
+| `A` | Selección directa | Puntos, tiradores y segmentos. Doble clic en un punto = suave/esquina; doble clic o `Shift`+clic en un segmento = añadir punto (con `Shift`+arrastre sale ya como curva Bézier); **clic de rueda** = alterna esquina/curva en los puntos seleccionados; arrastrar un segmento lo curva moviendo los dos tiradores; `B` = snap a vértices (se apaga al engancharse o con otro `B`); `Supr` borra puntos. **Rueda sobre un punto**: ver abajo. |
 | `P` | Pluma | Clic = esquina, clic-arrastrar = curva, clic en el primer punto = cerrar, `Enter`/`Esc` = terminar. Clic en el extremo de un trazo seleccionado lo continúa. |
-| `B` | Lápiz | Trazo libre suavizado a Bézier. |
-| `U` `E` `L` | Rectángulo / Elipse / Línea | Radio de esquina en la barra de opciones. |
+| `N` | Lápiz | Trazo libre suavizado a Bézier. |
+| `G` `E` `L` | Rectángulo / Elipse / Línea | Radio de esquina en la barra de opciones. |
 | `T` | Texto | Clic para crear o editar. |
-| `G` | Cubo de pintura | Ver abajo. |
+| `U` | Cubo de pintura | Ver abajo. |
 | `S` | Medir | Ver abajo. |
 | `C` | Canvas (tamaño de la hoja) | Arrastra las asas de la hoja actual para cambiar su tamaño (`Shift` = proporcional, `Alt` = desde el centro, con snapping), o escribe el ancho y alto exactos arriba. **Nada de lo dibujado se mueve**: solo cambia la hoja. Clic en otra hoja para trabajar con ella. |
 | `H` `Z` | Mano / Zoom | `Espacio` = mano temporal. |
@@ -125,13 +125,14 @@ En la barra de opciones de **Mover** puedes elegir si el clic selecciona el *ele
 
 Relleno, trazo, **grosor**, **tipo de línea** (sólida, rayas, puntos, punto-raya), **final de línea** (plano, redondo, cuadrado), esquinas, **flecha de inicio / final** (triángulo, abierta, círculo, cuadrado, rombo) y su tamaño. Al seleccionar texto o una medición aparece una segunda fila con fuente, tamaño, negrita/cursiva, color, etc. Sin nada seleccionado, cambia el estilo con el que se crearán los siguientes objetos.
 
-### Cubo de pintura inteligente (`G`)
+### Cubo de pintura inteligente (`U`)
 
 - Se calcula con la **geometría** de todos los trazos visibles (no con los píxeles de la vista): no depende del zoom ni de qué esté tapando qué, así que no quedan "huequitos" por la vista.
 - **"Close gaps up to"** (en la barra de opciones, en px del documento): los huecos de contorno menores a ese valor se consideran cerrados. Si el área sigue abierta, el programa te lo dice en la barra de estado.
 - El relleno se crea como una forma nueva, justo encima del relleno que había debajo (o al fondo de la capa de destino), y por tanto **detrás de tus líneas**.
 - `Alt`+clic recolorea la forma rellena que haya bajo el cursor.
 - El color es el de relleno actual de la barra de estilo.
+- **El borde de la hoja cuenta como límite:** una forma que se sale de la hoja (medio círculo, por ejemplo) se rellena igualmente, recortada a la hoja. Si el área solo se cierra con los cuatro bordes (el fondo vacío o un contorno abierto), no se rellena.
 
 ### Medición (`S`)
 
@@ -166,6 +167,8 @@ Pensado para que un dibujo enorme (decenas de miles de trazos, o un solo trazo c
 - **Deshacer** comparte entre copias los vectores que no cambiaron (antes copiaba el documento entero en cada edición).
 - **Capas:** las carpetas muy largas muestran los primeros 800 vectores y una fila "… N more" para ir cargando el resto.
 - **Selección directa (`A`)** dibuja todos los nodos solo si caben (600); con trazos de miles de nodos muestra los que están junto al cursor y los seleccionados.
+- **Selección directa con muchos puntos:** los marcadores se dibujan por lotes, la herramienta mantiene sus tablas numpy al mover un punto (no las reconstruye) y un trazo con muchos subtrazados se pinta solo en la parte visible; al arrastrar un trazo muy pesado se desactiva el suavizado mientras dura el arrastre (vuelve al soltar).
+- **Motor de dibujo:** `Ver > Renderer` permite elegir *Software* (CPU, por defecto) u *OpenGL* (GPU, experimental); se aplica al reiniciar. Si OpenGL no llega a dibujar un fotograma, la siguiente vez vuelve solo a software. También con `VF_RENDERER=software|opengl`.
 - Si algo se ve raro, `VF_NO_CACHE=1 ./VectorFlow.AppImage` desactiva la caché de dibujo (vuelve al modo antiguo, más lento).
 
 ### Limitaciones conocidas

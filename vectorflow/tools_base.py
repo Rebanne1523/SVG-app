@@ -51,6 +51,9 @@ class Tool:
         # that don't use it must still see that click (e.g. quick A -> B -> offset in Measure).
         self.press(ev)
 
+    def middle_click(self, ev):
+        """The mouse wheel was clicked (not dragged)."""
+
     def wheel(self, ev, delta) -> bool:
         return False
 

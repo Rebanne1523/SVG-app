@@ -34,6 +34,16 @@ class NodeItem(QTreeWidgetItem):
         self.shown = 0           # how many of the node's children are listed (from the top)
 
 
+class SubItem(QTreeWidgetItem):
+    """A sub-path of the compound path being looked into (a view: the drawing is not changed)."""
+
+    def __init__(self, sp, index):
+        super().__init__()
+        self.sp = sp
+        self.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.setText(COL_NAME, f"Sub-path {index}  ({len(sp.anchors)} points)")
+
+
 class MoreItem(QTreeWidgetItem):
     """"… N more" row at the end of a very long folder: click it to list the next batch."""
 
@@ -83,6 +93,9 @@ class LayerTree(QTreeWidget):
             if e.button() == Qt.LeftButton:
                 self.panel.show_more(item)
             return
+        if isinstance(item, SubItem):
+            super().mousePressEvent(e)
+            return
         if item is not None and col in (COL_EYE, COL_LOCK) and e.button() == Qt.LeftButton:
             if col == COL_EYE:
                 self.panel.toggle_visible(item.node, bool(e.modifiers() & Qt.AltModifier))
@@ -110,7 +123,7 @@ class LayerTree(QTreeWidget):
     def mouseDoubleClickEvent(self, e):
         item = self.itemAt(e.position().toPoint())
         col = self.columnAt(int(e.position().x()))
-        if isinstance(item, MoreItem):
+        if isinstance(item, (MoreItem, SubItem)):
             return
         if item is not None and col == COL_NAME:
             n = item.node
@@ -318,6 +331,7 @@ class LayersPanel(QWidget):
 
     def exit_entered(self):
         self.entered = None
+        self.get_doc().set_inside_focus(None)
         while self.tabs.count() > 1:
             self.tabs.removeTab(1)
         self.tabs.setVisible(False)
@@ -349,6 +363,15 @@ class LayersPanel(QWidget):
         self.tree.clear()
         self.item_of = {}
         self._hl = None
+        if self.entered is not None and not self.entered.is_group():
+            for i, sp in enumerate(self.entered.subpaths, 1):
+                it = SubItem(sp, i)
+                self.tree.addTopLevelItem(it)
+                if sp is d.inside_focus:
+                    it.setSelected(True)
+            self._building = False
+            self._syncing = False
+            return
         cur = d.current_sheet()
         top = self.entered if self.entered is not None else cur
         budget = [BUDGET]
@@ -416,6 +439,12 @@ class LayersPanel(QWidget):
         return cur
 
     def sync_from_doc(self):
+        if self.entered is not None and not self.entered.is_group():
+            d = self.get_doc()
+            if list(d.selection) != [self.entered]:     # something else was picked: leave the compound view
+                self.exit_entered()
+            else:
+                return
         if self._from_tree:
             self.sync_light()
             return
@@ -445,6 +474,10 @@ class LayersPanel(QWidget):
 
     def _tree_selection(self):
         if self._syncing:
+            return
+        if self.entered is not None and not self.entered.is_group():
+            subs = [it.sp for it in self.tree.selectedItems() if isinstance(it, SubItem)]
+            self.get_doc().set_inside_focus(subs[0] if len(subs) == 1 else None)
             return
         nodes = [it.node for it in self.tree.selectedItems() if isinstance(it, NodeItem)]
         self._from_tree = True
@@ -514,6 +547,8 @@ class LayersPanel(QWidget):
             node.locked = not node.locked
 
     def _targets(self):
+        if self.entered is not None and not self.entered.is_group():
+            return []           # looking inside a compound: Delete / Group must not act on the whole thing
         return list(self.get_doc().selection)
 
     def group_selection(self):
@@ -545,6 +580,8 @@ class LayersPanel(QWidget):
     def _menu(self, pos: QPoint):
         d = self.get_doc()
         it = self.tree.itemAt(pos)
+        if isinstance(it, (SubItem, MoreItem)):
+            return
         m = QMenu(self)
         m.addAction("New layer", lambda: d.new_folder(as_layer=True))
         m.addAction("New folder", lambda: d.new_folder())

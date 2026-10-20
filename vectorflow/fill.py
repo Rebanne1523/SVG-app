@@ -136,7 +136,22 @@ def make_fill_node(poly, color, name="Fill"):
 
 def fill_at(doc, pt, color, gap=3.0):
     r = doc.sheets_rect()
-    res = find_region(collect_lines(doc), pt, gap, (r.right(), r.bottom()), collect_widths(doc))
+    lines, widths = collect_lines(doc), collect_widths(doc)
+    page = (r.right(), r.bottom())
+    res = find_region(lines, pt, gap, page, widths)
+    sh = doc.sheet_at(pt) if res.polygon is None else None
+    if sh is not None:
+        # the edge of the page closes a shape that sticks out of it (half a circle still fills). A region
+        # that reaches all four edges is just the empty background leaking through an open outline: refuse.
+        sr = sh.rect()
+        edge = LineString([(sr.left(), sr.top()), (sr.right(), sr.top()), (sr.right(), sr.bottom()),
+                           (sr.left(), sr.bottom()), (sr.left(), sr.top())])
+        res2 = find_region(lines + [edge], pt, gap, page, widths + [0.0])
+        if res2.polygon is not None:
+            x0, y0, x1, y1 = res2.polygon.bounds
+            t = max(1.0, gap)
+            if not (x0 <= sr.left() + t and y0 <= sr.top() + t and x1 >= sr.right() - t and y1 >= sr.bottom() - t):
+                res = res2
     if res.polygon is None:
         return None, res
     geoms = list(res.polygon.geoms) if isinstance(res.polygon, MultiPolygon) else [res.polygon]

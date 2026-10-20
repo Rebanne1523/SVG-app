@@ -507,11 +507,54 @@ class PathNode(Node):
         p = getattr(self, "_c_path", None)
         if p is None:
             p = QPainterPath()
-            for sp in self.subpaths:
-                sp.add_to(p)
+            if len(self.subpaths) > 1:
+                for q in self._sub_paths():
+                    p.addPath(q)
+            else:
+                for sp in self.subpaths:
+                    sp.add_to(p)
             p.setFillRule(Qt.OddEvenFill if self.style.fill_rule == "evenodd" else Qt.WindingFill)
             self._c_path = p
         return p
+
+    def _sub_paths(self):
+        """One QPainterPath per sub-path (cached, so moving a point rebuilds only its own sub-path)."""
+        c = self.__dict__.get("_c_sp")
+        if c is None:
+            c = []
+            for sp in self.subpaths:
+                q = QPainterPath()
+                sp.add_to(q)
+                c.append(q)
+            self.__dict__["_c_sp"] = c
+        return c
+
+    def touch_points(self, anchors):
+        """touch() for a edit that only moved existing points/handles of ``anchors`` (no point added or
+        removed): the per-sub-path shapes and the Direct tool's anchor table are patched instead of
+        rebuilt, which is what keeps dragging a point of a huge path smooth."""
+        d = self.__dict__
+        sps, tab = d.get("_c_sp"), d.get("_c_atab")
+        if sps is None or tab is None or len(sps) != len(self.subpaths) or len(anchors) > 200:
+            self.touch()
+            return
+        sub = tab.sub_ids(self)
+        dirty = set()
+        for a in anchors:
+            k = tab.position_of(a)
+            if k is None:
+                self.touch()
+                return
+            tab.X[k], tab.Y[k], tab.IX[k], tab.IY[k], tab.OX[k], tab.OY[k] = a.x, a.y, a.ix, a.iy, a.ox, a.oy
+            dirty.add(int(sub[k]))
+        sps = list(sps)
+        for i in dirty:
+            q = QPainterPath()
+            self.subpaths[i].add_to(q)
+            sps[i] = q
+        self.touch()
+        d["_c_sp"] = sps
+        d["_c_atab"] = tab
 
     def get_geom(self):
         return ([sp.copy() for sp in self.subpaths], copy.deepcopy(self.clip))
@@ -1087,7 +1130,10 @@ class Document(QObject):
     restored = Signal()
     metaChanged = Signal()
     sheetChanged = Signal()
-    entered = Signal(object)       # a compound path was opened into a folder of independent paths
+    entered = Signal(object)       # a compound path is being looked into (see enter_compound)
+    insideChanged = Signal()       # the focused sub-path of that compound changed
+
+    inside_focus = None            # the SubPath highlighted/edited while looking inside a compound path
 
     def __init__(self, width=1920.0, height=1080.0, pt_per_unit=0.75):
         super().__init__()
@@ -1615,25 +1661,19 @@ class Document(QObject):
         return out
 
     def enter_compound(self, path):
-        """Open a compound path: it becomes a folder holding one independent path per sub-path, each
-        with its own fill and stroke. Returns the folder."""
+        """Look inside a compound path. Nothing changes in the drawing: the Layers panel lists its
+        sub-paths and one of them can be focused (highlighted, and the only one the Direct tool edits)."""
         if path.kind != "path" or len(path.subpaths) < 2 or path.parent is None:
             return None
-        parent = path.parent
-        idx = parent.children.index(path)
-        grp = Group(path.name or "Compound")
-        grp.opacity = path.opacity
-        with self.edit(structure=True):
-            parent.children.remove(path)
-            path.parent = None
-            parent.add(grp, idx)
-            for sp in path.subpaths:
-                piece = PathNode([sp.copy()], path.style.copy(), self.new_name("Path"))
-                piece.clip = [c.copy() for c in path.clip] if path.clip else None
-                grp.add(piece)
-        self.set_selection(list(grp.children[:1]))
-        self.entered.emit(grp)
-        return grp
+        self.inside_focus = None
+        self.set_selection([path])
+        self.entered.emit(path)
+        return path
+
+    def set_inside_focus(self, sp):
+        if sp is not getattr(self, "inside_focus", None):
+            self.inside_focus = sp
+            self.insideChanged.emit()
 
     # style ------------------------------------------------------------
     def style_targets(self, nodes):

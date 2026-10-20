@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 
+from .atable import anchor_table
 from .geometry import bez_tangent, dist, flatten_cubic
 from .model import arrow_length, arrow_path, box4, qcolor
 
@@ -170,12 +172,73 @@ def _draw_tiny(painter, node, opacity):
     painter.fillRect(QRectF(l, t, max(r - l, 0.0), max(b - t, 0.0)), brush_of(col))
 
 
-def _draw_leaf(painter, node, opacity):
+def view_path(node, cull):
+    """Seen from close up, a path made of many sub-paths only needs the ones that can reach the visible
+    area: painting (and stroking) the whole thing for a few points on screen is what makes zooming into a
+    big imported drawing slow. The result is identical for fill and stroke."""
+    path = node.qpath()
+    n = len(node.subpaths)
+    if cull is None or n < 8 or path.elementCount() < 1500:
+        return path
+    key = (cull.left(), cull.top(), cull.right(), cull.bottom())
+    d = node.__dict__
+    c = d.get("_c_vp")
+    if c is not None and c[0] == key:
+        return c[1]
+    st = node.style
+    pad = st.width * 4.0 + 2.0
+    if not st.fill and not st.dash:
+        out = _visible_segments(node, key, pad)
+    else:
+        boxes = d.get("_c_spb")
+        sps = node._sub_paths()
+        if boxes is None:
+            boxes = d["_c_spb"] = np.array([(r.left(), r.top(), r.right(), r.bottom())
+                                            for r in (q.boundingRect() for q in sps)], dtype=float).reshape(-1, 4)
+        mask = ((boxes[:, 2] + pad >= key[0]) & (boxes[:, 0] - pad <= key[2]) &
+                (boxes[:, 3] + pad >= key[1]) & (boxes[:, 1] - pad <= key[3]))
+        if mask.all():
+            out = path
+        else:
+            out = QPainterPath()
+            for i in np.flatnonzero(mask):
+                out.addPath(sps[i])
+            out.setFillRule(path.fillRule())
+    d["_c_vp"] = (key, out)
+    return out
+
+
+def _visible_segments(node, key, pad):
+    """Only the segments of an outline (no fill, solid line) that can reach the visible area, so a big
+    path seen from close up costs what is on screen. Cut ends lie outside the view."""
+    t = anchor_table(node)
+    k = np.flatnonzero(t.nxt >= 0)
+    nx = t.nxt[k]
+    xs = np.stack([t.X[k], t.OX[k], t.IX[nx], t.X[nx]])
+    ys = np.stack([t.Y[k], t.OY[k], t.IY[nx], t.Y[nx]])
+    vis = ((xs.max(0) + pad >= key[0]) & (xs.min(0) - pad <= key[2]) &
+           (ys.max(0) + pad >= key[1]) & (ys.min(0) - pad <= key[3]))
+    out = QPainterPath()
+    cur = -1
+    X, Y, OX, OY, IX, IY = t.X, t.Y, t.OX, t.OY, t.IX, t.IY
+    for i in np.flatnonzero(vis):
+        a, b = int(k[i]), int(nx[i])
+        if cur != a:
+            out.moveTo(float(X[a]), float(Y[a]))
+        if OX[a] == X[a] and OY[a] == Y[a] and IX[b] == X[b] and IY[b] == Y[b]:
+            out.lineTo(float(X[b]), float(Y[b]))
+        else:
+            out.cubicTo(float(OX[a]), float(OY[a]), float(IX[b]), float(IY[b]), float(X[b]), float(Y[b]))
+        cur = b
+    return out
+
+
+def _draw_leaf(painter, node, opacity, cull=None):
     kind = node.kind
     if kind == "path":
         painter.setOpacity(opacity)
         st = node.style
-        path = node.qpath()
+        path = view_path(node, cull) if not has_arrows(node) else node.qpath()
         if st.fill:
             painter.fillPath(path, brush_of(st.fill))
         if st.stroke and st.width > 0:
@@ -224,7 +287,7 @@ def draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=None,
         for c in node.children:
             draw_node(painter, c, opacity, skip, cull, min_size)
     else:
-        _draw_leaf(painter, node, opacity)
+        _draw_leaf(painter, node, opacity, cull)
     if clip is not None:
         painter.restore()
     painter.setOpacity(parent_opacity)
@@ -262,7 +325,7 @@ def iter_draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=
                 yield
                 painter.setOpacity(parent_opacity)
                 return
-        _draw_leaf(painter, node, opacity)
+        _draw_leaf(painter, node, opacity, cull)
         yield
     if clip is not None:
         painter.restore()

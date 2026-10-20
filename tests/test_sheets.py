@@ -365,16 +365,29 @@ def test_enter_compound_and_palette(win):
     cb.refresh()
     cb.pick("stroke", (9, 9, 9, 255))
     assert p.style.stroke == (9, 9, 9, 255) and p.style.fill == (0, 0, 255, 255)
-    # double click on the canvas enters the compound: independent paths, own colours
+    # double click on the canvas only *looks inside* the compound: the drawing is not changed
     D = Driver(win.canvas)
     D.dblclick((110, 110))
     paths = [n for n in walk(win.doc.root) if n.kind == "path"]
-    assert len(paths) == 2 and len(win.doc.selection) == 1
-    assert win.layers.entered is not None and win.layers.tabs.isVisible()
-    cb.pick("fill", (1, 2, 3, 255))
-    sel = win.doc.selection[0]
-    others = [n for n in paths if n is not sel]
-    assert sel.style.fill == (1, 2, 3, 255) and others[0].style.fill == (0, 0, 255, 255)
+    assert paths == [p] and win.doc.selection == [p] and len(p.subpaths) == 2
+    assert win.layers.entered is p and win.layers.tabs.isVisible()
+    from vectorflow.layers_panel import SubItem
+    assert win.layers.tree.topLevelItemCount() == 2
+    it = win.layers.tree.topLevelItem(1)
+    assert isinstance(it, SubItem)
+    it.setSelected(True)
+    assert win.doc.inside_focus is p.subpaths[1]
+    # only the focused sub-path is editable with the Direct tool
+    win.canvas.set_tool("direct")
+    tool = win.canvas.tool
+    assert tool.hit_anchor(win.canvas.to_view((100, 100))) is None      # belongs to the outer square
+    assert tool.hit_anchor(win.canvas.to_view((150, 150))) is not None
+    # Delete in the panel must not remove the whole compound while looking inside
+    win.layers.delete_selection()
+    assert p.parent is not None
+    # picking something else leaves the view
+    win.doc.set_selection([])
+    assert win.layers.entered is None and win.doc.inside_focus is None
 
 
 def test_measure_text_rule():

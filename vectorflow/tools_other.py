@@ -1,4 +1,4 @@
-"""Hand (H), Zoom (Z), Paint bucket (G) and Measure (I) tools."""
+"""Hand (H), Zoom (Z), Paint bucket (U) and Measure (I) tools."""
 from __future__ import annotations
 
 import math
@@ -120,7 +120,7 @@ def bucket_cursor():
 class BucketTool(Tool):
     name = "bucket"
     label = "Paint Bucket"
-    shortcut = "G"
+    shortcut = "U"
     hint = ("Click inside an enclosed area to fill it. It works on the vector outlines, not on what is visible, "
             "and closes small gaps. Alt+click recolours the shape under the cursor instead.")
 

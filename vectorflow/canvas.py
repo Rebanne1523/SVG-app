@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import math
+import os
 from time import perf_counter
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen, QTransform)
 from PySide6.QtWidgets import QInputDialog, QWidget
 
 from . import model, scenecache
 from .hitindex import HitIndex
 from .model import Sheet, a_to_t, arrow_length, walk
-from .render import draw_node, render_document
+from .render import draw_node, render_document, view_path
 from .scenecache import SceneCache
 from .snap import EdgeIndex, SnapIndex
 
@@ -47,7 +48,35 @@ class Ev:
         return self.p[1]
 
 
-class Canvas(QWidget):
+def _choose_backend():
+    """"software" (QPainter on the CPU, the default) or "opengl" (QOpenGLWidget, experimental). Picked in
+    View > Renderer (needs a restart) or with VF_RENDERER=software|opengl. If the last OpenGL start never got
+    to draw a frame (no usable driver), fall back to software and say so."""
+    st = QSettings("VectorFlow", "VectorFlow")
+    want = os.environ.get("VF_RENDERER") or str(st.value("render/backend", "software"))
+    if want != "opengl":
+        return "software", None
+    if str(st.value("render/pending", "false")).lower() == "true":
+        st.setValue("render/pending", False)
+        st.setValue("render/backend", "software")
+        return "software", "OpenGL did not start last time, so VectorFlow went back to the software renderer."
+    try:
+        from PySide6.QtOpenGLWidgets import QOpenGLWidget  # noqa: F401
+    except ImportError:
+        return "software", "OpenGL widgets are not available in this build; using the software renderer."
+    st.setValue("render/pending", True)
+    st.sync()
+    return "opengl", None
+
+
+BACKEND, BACKEND_NOTE = _choose_backend()
+if BACKEND == "opengl":
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget as _Base
+else:
+    _Base = QWidget
+
+
+class Canvas(_Base):
     zoomChanged = Signal(float)
     cursorMoved = Signal(float, float)
     message = Signal(str)
@@ -99,7 +128,7 @@ class Canvas(QWidget):
     def set_document(self, doc):
         if self.doc is not None:
             for sig, slot in ((self.doc.contentChanged, self._on_content), (self.doc.selectionChanged, self.update),
-                              (self.doc.restored, self._on_restored)):
+                              (self.doc.insideChanged, self.update), (self.doc.restored, self._on_restored)):
                 try:
                     sig.disconnect(slot)
                 except (RuntimeError, TypeError):
@@ -113,6 +142,7 @@ class Canvas(QWidget):
         doc.contentChanged.connect(self._on_content)
         doc.warmed.connect(lambda: self._idx_timer.start(250))
         doc.selectionChanged.connect(self.update)
+        doc.insideChanged.connect(self.update)
         doc.restored.connect(self._on_restored)
         self._doc_rev += 1
         self.hover = None
@@ -237,7 +267,19 @@ class Canvas(QWidget):
         super().resizeEvent(e)
 
     # ------------------------------------------------------------ painting
-    def paintEvent(self, e):
+    if BACKEND == "opengl":
+        def paintGL(self):
+            self._paint_all()
+            if not self._gl_ok:
+                self._gl_ok = True              # a frame was drawn: the driver works
+                QSettings("VectorFlow", "VectorFlow").setValue("render/pending", False)
+    else:
+        def paintEvent(self, e):
+            self._paint_all()
+
+    _gl_ok = False
+
+    def _paint_all(self):
         p = QPainter(self)
         p.fillRect(self.rect(), BG)
         vt = self.view_transform()
@@ -254,11 +296,35 @@ class Canvas(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         self._paint_sheet_frames(p, cur)
         self._paint_selection(p, vt)
+        self._paint_inside(p, vt)
         self._paint_guides(p)
         if self.tool is not None:
             self.tool.paint(p)
         self._paint_marker(p)
         p.end()
+
+    def _paint_inside(self, p, vt):
+        """Highlight the sub-path picked in the Layers panel while looking inside a compound path."""
+        f = self.doc.inside_focus
+        if f is None or not f.anchors or not any(f in n.subpaths for n in self.doc.selection if n.kind == "path"):
+            return
+        path = QPainterPath()
+        path.moveTo(*f.anchors[0].p)
+        for _, a, b in f.segments():
+            if a.has_out() or b.has_in():
+                path.cubicTo(*a.hout, *b.hin, *b.p)
+            else:
+                path.lineTo(*b.p)
+        if f.closed:
+            path.closeSubpath()
+        p.save()
+        p.setTransform(vt)
+        pen = QPen(QColor(255, 140, 0), 2.5 / self.zoom)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(QColor(255, 140, 0, 40))
+        p.drawPath(path)
+        p.restore()
 
     def _live_key(self):
         lv = self.live
@@ -332,8 +398,15 @@ class Canvas(QWidget):
         p.save()
         p.setTransform(vt)
         p.setClipRect(self.view_rect_doc().adjusted(-2, -2, 2, 2))
+        vr = self.view_rect_doc().adjusted(-2, -2, 2, 2)
         for n, op in lv["leaves"]:
-            draw_node(p, n, op)
+            # while a heavy outline is being dragged, anti-aliasing is what costs (8x here); it comes back on release
+            heavy = live is not None and n.kind == "path" and view_path(n, vr).elementCount() > 600
+            if heavy:
+                p.setRenderHint(QPainter.Antialiasing, False)
+            draw_node(p, n, op, cull=vr)
+            if heavy:
+                p.setRenderHint(QPainter.Antialiasing, True)
         p.restore()
 
     def _drop_linger(self):
@@ -760,6 +833,7 @@ class Canvas(QWidget):
         self.setFocus()
         if e.button() == Qt.MiddleButton or (self._space and e.button() == Qt.LeftButton):
             self._pan = (e.position().x(), e.position().y())
+            self._pan_moved = 0.0
             self.update_cursor()
             return
         if self.tool is None:
@@ -770,6 +844,7 @@ class Canvas(QWidget):
     def mouseMoveEvent(self, e):
         if self._pan is not None:
             x, y = e.position().x(), e.position().y()
+            self._pan_moved = getattr(self, "_pan_moved", 0.0) + abs(x - self._pan[0]) + abs(y - self._pan[1])
             self.pan_by(x - self._pan[0], y - self._pan[1])
             self._pan = (x, y)
             return
@@ -784,6 +859,9 @@ class Canvas(QWidget):
         if self._pan is not None and e.button() in (Qt.MiddleButton, Qt.LeftButton):
             self._pan = None
             self.update_cursor()
+            if e.button() == Qt.MiddleButton and getattr(self, "_pan_moved", 0.0) < 4 and self.tool is not None:
+                self.tool.middle_click(Ev(self, e))     # a click of the wheel (no drag): tools may use it
+                self.update()
             return
         if self.tool is not None:
             self.tool.release(Ev(self, e))
