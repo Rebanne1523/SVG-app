@@ -838,7 +838,12 @@ class Canvas(_Base):
             return
         if self.tool is None:
             return
-        self.tool.press(Ev(self, e))
+        ev = Ev(self, e)
+        if e.button() == Qt.LeftButton:
+            under = self.doc.sheet_at(ev.p)
+            if under is not None and under is not self.doc.current_sheet():
+                self.doc.set_current_sheet(under)       # work happens on the sheet that is clicked, with any tool
+        self.tool.press(ev)
         self.update()
 
     def mouseMoveEvent(self, e):

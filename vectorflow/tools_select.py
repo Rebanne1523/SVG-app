@@ -509,7 +509,7 @@ class SelectTool(Tool):
             p.drawText(rr, Qt.AlignCenter, text)
 
 
-MARKER_CAP = 600          # anchors drawn at once by the Direct tool (the rest only near the cursor)
+MARKER_CAP = 1500         # anchors drawn at once by the Direct tool (the rest only near the cursor)
 
 
 # =============================================================================================
@@ -1167,7 +1167,7 @@ class DirectTool(Tool):
                 # far too many to draw (or to use): keep the ones around the cursor and the selected ones
                 keep = np.zeros(len(t.flat), dtype=bool)
                 if cursor is not None:
-                    keep = np.hypot(vx - cursor[0], vy - cursor[1]) <= 90
+                    keep = np.hypot(vx - cursor[0], vy - cursor[1]) <= 180
                 for _, a in self.sel:
                     k = t.position_of(a)
                     if k is not None:

@@ -93,3 +93,21 @@ def test_palette_marks_the_selected_swatch(win):
     assert strip._index_of(None) == 0
     assert strip._index_of(PALETTE[5]) == 6
     assert strip._index_of((1, 2, 3, 255)) is None
+
+
+def test_clicking_another_sheet_with_any_tool_makes_it_current(win):
+    c = win.canvas
+    d = c.doc
+    s1 = d.current_sheet()
+    s2 = d.new_sheet(width=600, height=400, x=s1.x + s1.width + 100, y=0)
+    d.set_current_sheet(s2)
+    d.set_current_sheet(s1)
+    c.set_tool("rect")
+    D = Driver(c)
+    pt = (s2.x + 100, s2.y + 100)
+    D.press(pt)
+    D.move((pt[0] + 40, pt[1] + 40))
+    D.release((pt[0] + 40, pt[1] + 40))
+    assert d.current_sheet() is s2
+    made = d.selection[0]
+    assert d.sheet_of(made) is s2
