@@ -5,18 +5,18 @@ from __future__ import annotations
 from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
-                               QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+                               QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QPushButton, QTabBar, QToolButton, QVBoxLayout)
 
 from .numfield import NumField
 from .render import sheet_thumbnail
 
-TILE = QSize(210, 175)
+TILE = QSize(224, 196)
 
 
 def unit_icon(sheets):
     """Preview of one export unit: its pages fanned out like a small stack."""
-    pm = QPixmap(TILE.width() - 20, 140)
+    pm = QPixmap(TILE.width() - 40, 118)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing, True)
@@ -33,7 +33,9 @@ def unit_icon(sheets):
         p.setBrush(Qt.NoBrush)
         p.drawRect(x, y, img.width() - 1, img.height() - 1)
     p.end()
-    return QIcon(pm)
+    icon = QIcon(pm)
+    icon.addPixmap(pm, QIcon.Selected)                  # keep the preview readable on a selected tile
+    return icon
 
 
 class UnitList(QListWidget):
@@ -43,7 +45,7 @@ class UnitList(QListWidget):
         super().__init__()
         self.dialog = dialog
         self.setViewMode(QListView.IconMode)
-        self.setIconSize(QSize(TILE.width() - 20, 140))
+        self.setIconSize(QSize(TILE.width() - 40, 118))
         self.setGridSize(TILE)
         self.setResizeMode(QListView.Adjust)
         self.setMovement(QListView.Snap)
@@ -53,7 +55,8 @@ class UnitList(QListWidget):
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.setWordWrap(True)
-        self.setSpacing(4)
+        self.setSpacing(10)
+        self.setUniformItemSizes(True)
 
     def mousePressEvent(self, e):
         # the little box on a tile adds / removes just that tile; Shift or Ctrl+click extend the selection
@@ -80,13 +83,16 @@ class ExportDialog(QDialog):
     def __init__(self, parent, doc, folder="", sel_name=""):
         super().__init__(parent)
         self.setWindowTitle("Export")
-        self.resize(640, 640)
+        self.resize(780, 820)
+        self.setMinimumSize(640, 640)
         self.doc = doc
         self.bg = None                                      # None = transparent
         self.units = [[s] for s in doc.sheets()]          # list of lists of Sheet
         self.names = {}                                    # custom file names: id(unit) / "doc" / "sel"
         self.sel_name = sel_name or "selection"
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 16)
+        lay.setSpacing(12)
 
         self.tabs = QTabBar()
         self.tabs.setExpanding(True)
@@ -99,6 +105,7 @@ class ExportDialog(QDialog):
         lay.addWidget(self.tabs)
 
         modes = QHBoxLayout()
+        modes.setSpacing(8)
         self.mode_group = QButtonGroup(self)
         self.mode_btns = {}
         for key, label in (("document", "Document"), ("pages", "Page"), ("selection", "Selection")):
@@ -118,13 +125,17 @@ class ExportDialog(QDialog):
 
         self.hint = QLabel()
         self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color: #9aa;")
+        self.hint.setObjectName("hint")
         lay.addWidget(self.hint)
 
         self.list = UnitList(self)
         lay.addWidget(self.list, 1)
+        lay.addStretch(0)
+        self._spacer = lay.count() - 1                     # takes the free room while the list is hidden
+        self._lay = lay
 
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.all_btn = QPushButton("Select all")
         self.all_btn.clicked.connect(self.list.selectAll)
         self.sep_btn = QPushButton("Separate selected")
@@ -142,62 +153,81 @@ class ExportDialog(QDialog):
         row.addWidget(self.only_sel)
         lay.addLayout(row)
 
-        row = QHBoxLayout()
-        row.addStretch(1)
-        self.bg_btn = QToolButton()
-        self.bg_btn.setFixedSize(52, 28)
-        self.bg_btn.setToolTip("Background colour (PNG and PDF). Transparent by default.")
-        self.bg_btn.clicked.connect(self._pick_bg)
-        row.addWidget(self.bg_btn)
-        row.addWidget(QLabel("Background colour"))
-        lay.addLayout(row)
-        self._paint_bg()
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setObjectName("rule")
+        lay.addWidget(line)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("File name"))
+        # the options sit in one grid: labels on the left, fields lined up on the right
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+
+        def label(text):
+            lb = QLabel(text)
+            lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            return lb
+
         self.name_edit = QLineEdit()
         self.name_edit.textEdited.connect(self._name_edited)
-        row.addWidget(self.name_edit, 1)
-        lay.addLayout(row)
+        grid.addWidget(label("File name"), 0, 0)
+        grid.addWidget(self.name_edit, 0, 1, 1, 3)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Prefix"))
         self.prefix_edit = QLineEdit()
-        self.prefix_edit.setPlaceholderText("added before every name")
-        row.addWidget(self.prefix_edit, 1)
-        row.addWidget(QLabel("Suffix"))
+        self.prefix_edit.setPlaceholderText("before every name")
         self.suffix_edit = QLineEdit()
-        self.suffix_edit.setPlaceholderText("added after every name")
-        row.addWidget(self.suffix_edit, 1)
-        lay.addLayout(row)
+        self.suffix_edit.setPlaceholderText("after every name")
+        grid.addWidget(label("Prefix"), 1, 0)
+        grid.addWidget(self.prefix_edit, 1, 1)
+        grid.addWidget(label("Suffix"), 1, 2)
+        grid.addWidget(self.suffix_edit, 1, 3)
 
-        row = QHBoxLayout()
         self.folder_edit = QLineEdit(folder)
         self.folder_edit.setPlaceholderText("Folder to save into")
-        row.addWidget(self.folder_edit, 1)
         fb = QToolButton()
-        fb.setText("📁")
+        fb.setText("\U0001F4C1")
         fb.setToolTip("Choose folder")
         fb.clicked.connect(self._choose_folder)
-        row.addWidget(fb)
+        frow = QHBoxLayout()
+        frow.setSpacing(6)
+        frow.addWidget(self.folder_edit, 1)
+        frow.addWidget(fb)
+        grid.addWidget(label("Folder"), 2, 0)
+        grid.addLayout(frow, 2, 1, 1, 3)
+
         self.fmt = QComboBox()
-        for key, label in (("pdf", "PDF (*.pdf)"), ("svg", "SVG (*.svg)"), ("png", "PNG (*.png)")):
-            self.fmt.addItem(label, key)
-        row.addWidget(self.fmt)
-        self.scale_lbl = QLabel("Scale")
+        for key, label_ in (("pdf", "PDF (*.pdf)"), ("svg", "SVG (*.svg)"), ("png", "PNG (*.png)")):
+            self.fmt.addItem(label_, key)
+        self.scale_lbl = label("Scale")
         self.scale = NumField()
         self.scale.setRange(0.1, 20)
         self.scale.setValue(1.0)
         self.scale.setDecimals(2)
-        row.addWidget(self.scale_lbl)
-        row.addWidget(self.scale)
-        lay.addLayout(row)
+        grid.addWidget(label("Format"), 3, 0)
+        grid.addWidget(self.fmt, 3, 1)
+        grid.addWidget(self.scale_lbl, 3, 2)
+        grid.addWidget(self.scale, 3, 3)
+
+        self.bg_btn = QToolButton()
+        self.bg_btn.setFixedSize(56, 28)
+        self.bg_btn.setToolTip("Background colour (PNG and PDF). Transparent by default.")
+        self.bg_btn.clicked.connect(self._pick_bg)
+        brow = QHBoxLayout()
+        brow.addWidget(self.bg_btn)
+        brow.addStretch(1)
+        grid.addWidget(label("Background"), 4, 0)
+        grid.addLayout(brow, 4, 1, 1, 3)
+        lay.addLayout(grid)
+        self._paint_bg()
 
         self.overwrite = QCheckBox("Overwrite existing files without asking")
         lay.addWidget(self.overwrite)
 
         self.ok_btn = QPushButton("Export")
-        self.ok_btn.setMinimumHeight(36)
+        self.ok_btn.setObjectName("primary")
+        self.ok_btn.setMinimumHeight(40)
         self.ok_btn.setDefault(True)
         self.ok_btn.clicked.connect(self.accept)
         lay.addWidget(self.ok_btn)
@@ -281,6 +311,7 @@ class ExportDialog(QDialog):
         for w in (self.list, self.all_btn, self.sep_btn, self.preview):
             w.setVisible(m == "pages")
         self.list.setEnabled(m == "pages")
+        self._lay.setStretch(self._spacer, 0 if m == "pages" else 1)
         self.sep_btn.setEnabled(m == "pages")
         self.all_btn.setEnabled(m == "pages")
         self.only_sel.blockSignals(True)
