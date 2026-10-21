@@ -25,7 +25,7 @@ echo ">> Freezing with PyInstaller"
 pyinstaller --noconfirm --clean --name vectorflow --windowed \
     --paths "$ROOT" \
     --distpath "$BUILD/dist" --workpath "$BUILD/work" --specpath "$BUILD" \
-    --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy.tests \
+    --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy.tests \
     --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets \
     --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQml \
     packaging/launcher.py

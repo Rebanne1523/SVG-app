@@ -1,4 +1,4 @@
 PySide6-Essentials>=6.6
-PyMuPDF>=1.23
+PyMuPDF>=1.23,<2
 shapely>=2.0
 numpy>=1.24
