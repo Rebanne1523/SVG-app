@@ -208,28 +208,74 @@ def view_path(node, cull):
     return out
 
 
-def _visible_segments(node, key, pad):
-    """Only the segments of an outline (no fill, solid line) that can reach the visible area, so a big
-    path seen from close up costs what is on screen. Cut ends lie outside the view."""
+SEG_CHUNK = 256         # segments per cached block of a big outline
+
+
+def _segment_chunks(node):
+    """A big outline cut into blocks of consecutive segments, each with a bounding box. A block's path is
+    built the first time it is on screen and kept, so painting a view only adds the blocks that reach it
+    instead of walking every segment in Python. Cached on the node (dropped on touch())."""
+    d = node.__dict__
+    c = d.get("_c_seg")
+    if c is not None:
+        return c
     t = anchor_table(node)
     k = np.flatnonzero(t.nxt >= 0)
     nx = t.nxt[k]
     xs = np.stack([t.X[k], t.OX[k], t.IX[nx], t.X[nx]])
     ys = np.stack([t.Y[k], t.OY[k], t.IY[nx], t.Y[nx]])
-    vis = ((xs.max(0) + pad >= key[0]) & (xs.min(0) - pad <= key[2]) &
-           (ys.max(0) + pad >= key[1]) & (ys.min(0) - pad <= key[3]))
-    out = QPainterPath()
+    starts = np.arange(0, len(k), SEG_CHUNK)
+    if not len(starts):
+        c = d["_c_seg"] = (np.zeros((0, 4)), [], np.zeros(0, bool), None)
+        return c
+    boxes = np.stack([np.minimum.reduceat(xs.min(0), starts), np.minimum.reduceat(ys.min(0), starts),
+                      np.maximum.reduceat(xs.max(0), starts), np.maximum.reduceat(ys.max(0), starts)], axis=1)
+    joined = np.zeros(len(starts), bool)        # block continues the previous one: keep the line join
+    joined[1:] = k[starts[1:]] == nx[starts[1:] - 1]
+    c = d["_c_seg"] = (boxes, [None] * len(starts), joined, (t, k, nx))
+    return c
+
+
+def _chunk_path(chunks, i):
+    boxes, paths, joined, (t, k, nx) = chunks
+    q = paths[i]
+    if q is not None:
+        return q
+    q = QPainterPath()
     cur = -1
     X, Y, OX, OY, IX, IY = t.X, t.Y, t.OX, t.OY, t.IX, t.IY
-    for i in np.flatnonzero(vis):
-        a, b = int(k[i]), int(nx[i])
+    for j in range(i * SEG_CHUNK, min((i + 1) * SEG_CHUNK, len(k))):
+        a, b = int(k[j]), int(nx[j])
         if cur != a:
-            out.moveTo(float(X[a]), float(Y[a]))
+            q.moveTo(float(X[a]), float(Y[a]))
         if OX[a] == X[a] and OY[a] == Y[a] and IX[b] == X[b] and IY[b] == Y[b]:
-            out.lineTo(float(X[b]), float(Y[b]))
+            q.lineTo(float(X[b]), float(Y[b]))
         else:
-            out.cubicTo(float(OX[a]), float(OY[a]), float(IX[b]), float(IY[b]), float(X[b]), float(Y[b]))
+            q.cubicTo(float(OX[a]), float(OY[a]), float(IX[b]), float(IY[b]), float(X[b]), float(Y[b]))
         cur = b
+    paths[i] = q
+    return q
+
+
+def _visible_segments(node, key, pad):
+    """Only the segments of an outline (no fill, solid line) that can reach the visible area, so a big
+    path seen from close up costs what is on screen. Cut ends lie outside the view."""
+    chunks = _segment_chunks(node)
+    boxes, _, joined, _ = chunks
+    mask = ((boxes[:, 2] + pad >= key[0]) & (boxes[:, 0] - pad <= key[2]) &
+            (boxes[:, 3] + pad >= key[1]) & (boxes[:, 1] - pad <= key[3]))
+    if mask.all():
+        return node.qpath()
+    out = QPainterPath()
+    last = -2
+    for i in np.flatnonzero(mask):
+        i = int(i)
+        q = _chunk_path(chunks, i)
+        if i == last + 1 and joined[i]:
+            out.connectPath(q)
+        else:
+            out.addPath(q)
+        last = i
     return out
 
 
@@ -322,11 +368,11 @@ def iter_draw_node(painter: QPainter, node, parent_opacity=1.0, skip=None, cull=
             l, t, r, b = box4(node)
             if r - l < tiny and b - t < tiny:
                 _draw_tiny(painter, node, opacity)
-                yield
+                yield node
                 painter.setOpacity(parent_opacity)
                 return
         _draw_leaf(painter, node, opacity, cull)
-        yield
+        yield node
     if clip is not None:
         painter.restore()
     painter.setOpacity(parent_opacity)

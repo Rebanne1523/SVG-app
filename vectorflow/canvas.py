@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 from time import perf_counter
 
 from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer, Signal
@@ -13,7 +14,7 @@ from . import model, scenecache
 from .hitindex import HitIndex
 from .model import Sheet, a_to_t, arrow_length, walk
 from .render import draw_node, render_document, view_path
-from .scenecache import SceneCache
+from .scenecache import PROFILE, SceneCache
 from .snap import EdgeIndex, SnapIndex
 
 LIVE_LAYER_MIN = 300     # dragging more vectors than this moves a bitmap of them instead of redrawing each
@@ -280,6 +281,17 @@ class Canvas(_Base):
     _gl_ok = False
 
     def _paint_all(self):
+        if PROFILE:
+            t0 = perf_counter()
+            self._paint_frame()
+            ms = (perf_counter() - t0) * 1000.0
+            if ms > 16.0:
+                print(f"[vf] slow frame: {ms:.1f} ms (tool={type(self.tool).__name__}, zoom {self.zoom:.3g})",
+                      file=sys.stderr, flush=True)
+            return
+        self._paint_frame()
+
+    def _paint_frame(self):
         p = QPainter(self)
         p.fillRect(self.rect(), BG)
         vt = self.view_transform()

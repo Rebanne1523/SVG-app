@@ -9,6 +9,7 @@ the new view.
 from __future__ import annotations
 
 import os
+import sys
 from math import ceil
 from time import perf_counter
 
@@ -17,6 +18,7 @@ from PySide6.QtGui import QPainter, QPixmap, QTransform
 
 from .render import iter_render_document
 
+PROFILE = bool(os.environ.get("VF_PROFILE"))     # VF_PROFILE=1 prints what every re-render costs (stderr)
 ENABLED = not os.environ.get("VF_NO_CACHE")      # VF_NO_CACHE=1 paints every frame directly (debugging)
 LIGHT_MS = 8.0          # a scene that renders faster than this is drawn synchronously
 SLICE_MS = 9.0          # time budget per event-loop turn for a heavy scene
@@ -28,7 +30,8 @@ TINY_PX = 1.5           # vectors smaller than this are drawn as a flat rectangl
 
 
 class _Job:
-    __slots__ = ("pix", "painter", "gen", "rect", "zoom", "origin", "key", "dpr", "size", "spent")
+    __slots__ = ("pix", "painter", "gen", "rect", "zoom", "origin", "key", "dpr", "size", "spent", "slices", "slow",
+                 "leaves", "wall")
 
 
 class SceneCache(QObject):
@@ -221,6 +224,7 @@ class SceneCache(QObject):
         j = _Job()
         j.pix, j.painter, j.rect, j.zoom, j.origin = pix, painter, rect, z, c.origin
         j.key, j.dpr, j.size, j.spent = key, dpr, size, 0.0
+        j.slices, j.slow, j.leaves, j.wall = 0, [], 0, perf_counter()
         j.gen = iter_render_document(painter, c.doc, skip, cull, MIN_PX / z, only, TINY_PX / z)
         self.job = j
 
@@ -241,8 +245,17 @@ class SceneCache(QObject):
         t0 = perf_counter()
         n = 0
         done = True
-        for _ in j.gen:
+        if PROFILE:
+            t1 = t0
+            j.slices += 1
+        for node in j.gen:
             n += 1
+            if PROFILE:
+                t2 = perf_counter()
+                j.leaves += 1
+                if node is not None and t2 - t1 > 0.004:
+                    j.slow.append(((t2 - t1) * 1000.0, node))
+                t1 = t2
             if budget_ms is not None and (n & 15) == 0 and (perf_counter() - t0) * 1000.0 > budget_ms:
                 done = False
                 break
@@ -252,6 +265,8 @@ class SceneCache(QObject):
             self.pix, self.r_rect, self.r_zoom = j.pix, j.rect, j.zoom
             self.r_origin, self.r_key, self.r_size, self.r_dpr = j.origin, j.key, j.size, j.dpr
             ms = j.spent * 1000.0
+            if PROFILE:
+                _report(self.canvas, j, ms)
             self.render_ms = ms if self.render_ms == 0.0 else 0.5 * (self.render_ms + ms)
             self.render_ms = max(self.render_ms, 0.01)
             self.job = None
@@ -267,3 +282,14 @@ class SceneCache(QObject):
         finished = self._advance(SLICE_MS)
         if finished or self.pix is None:
             self.canvas.update()
+
+
+def _report(canvas, j, ms):
+    """One line per finished re-render, then the single objects that took 4 ms or more."""
+    wall = (perf_counter() - j.wall) * 1000.0
+    print(f"[vf] render {ms:6.1f} ms work, {wall:6.1f} ms wall, {j.slices} slices, {j.leaves} objects, "
+          f"zoom {j.zoom:.3g}, view {j.size[0]}x{j.size[1]} dpr {j.dpr:g}", file=sys.stderr, flush=True)
+    for t, node in sorted(j.slow, key=lambda x: -x[0])[:5]:
+        segs = sum(len(sp.anchors) for sp in getattr(node, "subpaths", ()))
+        print(f"[vf]    slow object: {t:6.1f} ms  {node.kind} {getattr(node, 'name', '') or ''!r}"
+              f"  subpaths={len(getattr(node, 'subpaths', ()))} anchors={segs}", file=sys.stderr, flush=True)

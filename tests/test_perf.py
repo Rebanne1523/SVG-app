@@ -410,3 +410,35 @@ def test_zoomed_out_tiny_vectors_still_look_right():
     settle(c, 60)
     assert mismatch(grab(c), direct(c), tol=40) < 0.02
     c.close()
+
+
+def test_big_outline_view_path_uses_cached_blocks_and_matches_pixels():
+    """A long polyline seen from close up only adds the blocks that reach the view; the picture is the same."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QImage, QPainter
+    from vectorflow import render
+    pts = [(i * 3.0, 40.0 + (i % 7) * 5.0) for i in range(3000)]
+    sps = [SubPath([Anchor(x, y) for x, y in pts[i:i + 300]], False) for i in range(0, 3000, 300)]
+    node = PathNode(sps, Style(fill=None, stroke=(0, 0, 0, 255), width=2), "long")
+    full = node.qpath()
+    near = render.view_path(node, QRectF(100, 0, 200, 100))
+    assert near.elementCount() < full.elementCount() / 4
+    assert render.view_path(node, QRectF(-10, -10, 9100, 200)).elementCount() == full.elementCount()
+    node.touch()
+    assert "_c_seg" not in node.__dict__
+
+    def shot(path):
+        img = QImage(200, 100, QImage.Format_ARGB32_Premultiplied)
+        img.fill(0xffffffff)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.translate(-100, 0)
+        p.setPen(node.style.pen())
+        p.drawPath(path)
+        p.end()
+        return img
+    import numpy as np
+
+    def px(i):
+        return np.frombuffer(i.constBits(), np.uint8).reshape(100, 200, 4).astype(int)
+    assert np.abs(px(shot(near)) - px(shot(full))).max() <= 2
